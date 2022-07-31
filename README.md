@@ -4,13 +4,19 @@
 
 `pydrsom` is a [PyTorch](https://pytorch.org/docs/stable/optim.html) implementation of DRSOM (Dimension-Reduced Second-Order Method).
 
-
 - See [quickstart](pydrsom/pydrsom/quickstart.py) for an example.
 - The `demo` included in this repo with a test on CIFAR10 is due to [adabound](https://github.com/Luolc/AdaBound)
 
 # Getting started
 
-The DRSOM provides a couple parameters to choose, see the docstring for details [drsom.py](pydrsom/drsom.py)
+- PYDRSOM is developed in `Python 3.8 (torch=1.11.0)`. It is easy to setup, see [requirements](requirements.txt) for dependencies.
+- The DRSOM provides a couple parameters to choose, see the docstring for details [drsom.py](pydrsom/drsom.py)
+  - generally, you only have to choose which type of trust-region to use by arg `option_tr`:
+  ```python
+  # option of trust-region, I or G?
+  #  - if 'a'; G = eye(2)
+  #  - if 'p'; G = [-g d]'[-g d]
+  ```
 
 ## Fashion-MNIST
 
