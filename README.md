@@ -10,7 +10,7 @@
 # Getting started
 
 - PYDRSOM is developed in `Python 3.8 (torch=1.11.0)`. It is easy to setup, see [requirements](requirements.txt) for dependencies.
-- The DRSOM provides a couple parameters to choose, see the docstring for details [drsom.py](pydrsom/drsom.py)
+- The DRSOM optimizer class provides a couple parameters, see the docstring for details [drsom.py](pydrsom/drsom.py)
   - generally, you only have to choose which type of trust-region to use by arg `option_tr`:
   ```python
   # option of trust-region, I or G?
@@ -20,7 +20,7 @@
 
 ## Fashion-MNIST
 
-You can see how to use by
+For usage, start at the root of this repo:
 
 ```bash
 python quickstart.py -h
@@ -46,7 +46,7 @@ If you want to see **very** detailed logs for DRSOM (which by default is turned 
 export DRSOM_VERBOSE=1; python quickstart.py --optim drsom --model cnn
 ```
 
-Then you can see the information for each "mini-batch", e.g.,
+Then you can see the inner interation information for each "mini-batch", e.g.,
 
 ```bash
 +----+-----+-------------------+----------+-------+--------+-------+-------+-------+-------+---------+-------+-------+------+--------+------+
@@ -62,15 +62,15 @@ Then you can see the information for each "mini-batch", e.g.,
 
 Some description:
 
-- $\lambda, Q, c, G, a (\alpha)$ corresponds to the definition in the paper.
+- $\lambda, Q, c, G, a (\alpha), f, rho (\rho)$ correspond to the definition in the paper.
 - $k, k0$ are total iteration # and inner iteration (trust-region) #, respectively.
-- $dQ, df$ are model reduction and actual reduction, respectively. then you can find the value for rho
-- $\gamma, \gamma-$ are current and last value for $\gamma_k$, respectively.
+- $dQ, df$ are model reduction and actual reduction, respectively. then you can find the value for rho $(\rho)$
+- $\gamma, \gamma-$ are current and last value for $\gamma_k$, respectively. 
 
 ## CIFAR10
-We also provide a preliminary script for CIFAR10. Please refer to the code: `demos/cifar10/main.py`
+We also provide a preliminary script for CIFAR10. Please refer to the code: `demos/cifar10/main.py`. This script is based on the training script of [adabound](https://github.com/Luolc/AdaBound).
 
-For usage, start at the root of this repo
+For usage, start at the root of this repo:
 
 ```bash
 python -u -m demos.cifar10.main -h
@@ -86,4 +86,5 @@ python -u -m demos.cifar10.main \
 pydrsom is licensed under the MIT License. Check `LICENSE` for more details
 
 ## Reference:
-[1] 
+
+[1] Chuwen Zhang, Dongdong Ge, Bo Jiang, and Yinyu Ye. DRSOM: A Dimension Reduced Second-Order Method and Preliminary Analyses, working paper. [arXiv]()

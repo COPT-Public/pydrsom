@@ -54,8 +54,8 @@ def get_parser():
                       help='weight decay for optimizers')
   
   # for drsom
-  parser.add_argument("--itermax", required=False, type=int, default=1)
-  parser.add_argument("--option_tr", required=False, type=str, default='a', choices=['a', 'p'])
+  parser.add_argument("--itermax", required=False, type=int, default=15)
+  parser.add_argument("--option_tr", required=False, type=str, default='p', choices=['a', 'p'])
   parser.add_argument("--hessian_window", required=False, type=int, default=1)
   parser.add_argument('--drsom_beta1', default=50, type=float, help='DRSOM coefficients beta_1')
   parser.add_argument('--drsom_beta2', default=30, type=float, help='DRSOM coefficients beta_2')
@@ -161,8 +161,10 @@ def create_optimizer(args, model_params):
     return DRSOMF(
       model_params,
       hessian_window=args.hessian_window,
+      option_tr=args.option_tr,
       beta1=args.drsom_beta1,
-      beta2=args.drsom_beta2
+      beta2=args.drsom_beta2,
+      max_iter=args.itermax
     )
   else:
     raise ValueError(f"Optimizer {args.optim} not defined")
