@@ -82,9 +82,24 @@ python -u -m demos.cifar10.main \
   --model resnet18 --optim drsom --epoch 50 --option_tr p --gamma_power 1e3
 ```
 
+## Known issues
+`DRSOM.jl` is still under active development. Please add issues on GitHub.
+
 ## License
 pydrsom is licensed under the MIT License. Check `LICENSE` for more details
 
-## Reference:
+## Acknowledgment
 
-[1] Chuwen Zhang, Dongdong Ge, Bo Jiang, and Yinyu Ye. DRSOM: A Dimension Reduced Second-Order Method and Preliminary Analyses, working paper. [arXiv]()
+- Special thanks go to the COPT team and Tianyi Lin [(Darren)](https://tydlin.github.io/) for helpful suggestions.
+## Reference 
+You are welcome to cite our paper :), [see](https://arxiv.org/abs/2208.00208)
+```bibtex
+@misc{zhang2022drsom,
+      title={DRSOM: A Dimension Reduced Second-Order Method and Preliminary Analyses}, 
+      author={Chuwen Zhang and Dongdong Ge and Bo Jiang and Yinyu Ye},
+      year={2022},
+      eprint={2208.00208},
+      archivePrefix={arXiv},
+      primaryClass={math.OC}
+}
+```
