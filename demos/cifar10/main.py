@@ -264,7 +264,8 @@ def main():
   train_accuracies = []
   test_accuracies = []
   print(f"lambda increased factor {args.gamma_power}")
-  gammabase = optimizer.gammalb
+  if args.optim in ['drsom']: 
+    gammabase = optimizer.gammalb
   for epoch in range(start_epoch + 1, args.epoch):
     if args.optim in ['drsom']:
       
