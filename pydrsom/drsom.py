@@ -237,7 +237,7 @@ class DRSOMF(torch.optim.Optimizer):
     
     return trs_est
   
-  def update_trust_region(self, flat_p, flat_g, flat_d):
+  def update_trust_region(self, flat_p, flat_g, flat_d, g_norm, d_norm):
     with torch.enable_grad():
       __unused = flat_p
       # size = flat_g.size()[0]//2
@@ -246,7 +246,7 @@ class DRSOMF(torch.optim.Optimizer):
       gg = flat_g.dot(flat_g)
       gd = flat_d.dot(flat_g)
       dd = flat_d.dot(flat_d)
-      
+
       if self.iter % self.freq == 0:
         # @note:
         #   compute Hv:
@@ -275,16 +275,16 @@ class DRSOMF(torch.optim.Optimizer):
         #   create_graph=True
         # ), target='self')
         
-        gHg = flat_g.dot(Hg)
-        gHd = flat_g.dot(Hd)
-        dHd = flat_d.dot(Hd)
+        gHg = flat_g.dot(Hg) / g_norm**2
+        gHd = flat_g.dot(Hd) / g_norm / d_norm
+        dHd = flat_d.dot(Hd) / d_norm**2
         Q = torch.tensor([[gHg, -gHd], [-gHd, dHd]], requires_grad=False)
       else:
         # if set freq = 1
         #   this never happens
         Q = torch.tensor([[gg, 0.0], [0.0, dd]], requires_grad=False)
       
-      c = torch.tensor([-gg, gd], requires_grad=False)
+      c = torch.tensor([-gg/g_norm, gd/d_norm], requires_grad=False)
       self.ghg = (Q[0, 0] + self.ghg * self.iter) / (self.iter + 1)
       self.Qa.appendleft(Q)
       self.ca.appendleft(c)
@@ -297,7 +297,7 @@ class DRSOMF(torch.optim.Optimizer):
       self.Q = sum(_Q * b[k] for k, _Q in enumerate(self.Qa))
       self.c = sum(_c * b[k] for k, _c in enumerate(self.ca))
       # use generalized a'Ga <= delta
-      G = torch.tensor([[gg, -gd], [-gd, dd]])
+      G = torch.tensor([[gg/g_norm**2, -gd/g_norm/d_norm], [-gd/g_norm/d_norm, dd/d_norm**2]])
       self.Ga.append(G)
       self.G = sum(_G * b[k] for k, _G in enumerate(self.Ga))
   
@@ -321,7 +321,12 @@ class DRSOMF(torch.optim.Optimizer):
     flat_d = self._gather_flat_grad([self.state[p]['momentum'] for p in self._params])
     # copy of it at last step
     p_copy = self._clone_param()
-    self.update_trust_region(flat_p, flat_g, flat_d)
+
+    g_norm = torch.linalg.norm(flat_g)
+    d_norm = torch.linalg.norm(flat_d)
+    d_norm = 1 if d_norm == 0 else d_norm
+    
+    self.update_trust_region(flat_p, flat_g, flat_d, g_norm, d_norm)
     # accept or not?
     acc_step = False
     # adjust lambda: (and thus trust region radius)
@@ -339,7 +344,7 @@ class DRSOMF(torch.optim.Optimizer):
       
       # build direction
       flat_new_d = torch.zeros_like(flat_d, requires_grad=False)
-      flat_new_d.add_(flat_g, alpha=-alpha1).add_(flat_d, alpha=alpha2)
+      flat_new_d.add_(flat_g/g_norm, alpha=-alpha1).add_(flat_d/d_norm, alpha=alpha2)
       flat_p.add_(flat_new_d)
       
       # accept or not？
