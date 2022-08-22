@@ -31,9 +31,9 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 parser = argparse.ArgumentParser(
   formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument("--optim",
-                    required=True,
+                    required=False,
                     type=str,
-                    default='simple',
+                    default='drsom',
                     choices=['drsom', 'adam', 'sgd4'])
 parser.add_argument("--model",
                     required=False,

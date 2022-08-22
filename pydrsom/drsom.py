@@ -345,10 +345,10 @@ class DRSOMF(torch.optim.Optimizer):
       # build direction
       flat_new_d = torch.zeros_like(flat_d, requires_grad=False)
       flat_new_d.add_(flat_g/g_norm, alpha=-alpha1).add_(flat_d/d_norm, alpha=alpha2)
-      flat_p.add_(flat_new_d)
+      flat_new_p = torch.zeros_like(flat_p, requires_grad=False).copy_(flat_p).add_(flat_new_d)
       
       # accept or not？
-      loss_est = self._directional_evaluate(closure, flat_p, flat_new_d)
+      loss_est = self._directional_evaluate(closure, flat_new_p, flat_new_d)
       loss_dec = loss - loss_est
       rho = loss_dec / trs_est
       
