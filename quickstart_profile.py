@@ -25,7 +25,7 @@ from torchvision import datasets
 from torchvision.transforms import ToTensor
 
 from pydrsom.drsom import DRSOMF
-from pydrsom.drsomnd import DRSOMF as DRSOMF3
+from pydrsom.drsomnd_profile import DRSOMF as DRSOMF3
 from pydrsom.drsom_utils import *
 
 parser = argparse.ArgumentParser(
@@ -156,8 +156,8 @@ def train(dataloader, name, model, loss_fn, optimizer, ninterval):
       return loss
     
     # backpropagation
-   
-    loss = optimizer.step(closure=closure)
+    
+    loss = optimizer.step(closure=closure, profiler=prof)
     avg_loss += loss.item()
     
     # compute prediction error
@@ -169,6 +169,7 @@ def train(dataloader, name, model, loss_fn, optimizer, ninterval):
     if batch % ninterval == 0:
       loss, current = loss.item(), batch * len(X)
       print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+    prof.step()
   
   accuracy = 100. * correct / total
   avg_loss = avg_loss / len(dataloader)
@@ -236,6 +237,13 @@ if __name__ == '__main__':
       download=True,
       transform=ToTensor(),
     )
+  prof = torch.profiler.profile(
+    schedule=torch.profiler.schedule(wait=0, warmup=0, active=2, repeat=0),
+    on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tflogger),
+    with_modules=True,
+    with_flops=True,
+    with_stack=True
+  )
   
   training_data.data = training_data.data[:args.data_size]
   training_data.targets = training_data.targets[:args.data_size]
@@ -338,9 +346,11 @@ if __name__ == '__main__':
   optimizer = func(model.parameters(), **func_kwargs)
   # log name
   log_name = query_name(optimizer, name, args, ckpt)
-
+  
   print(f"Using optimizer:\n {log_name}")
+  
   for t in range(start_epoch, start_epoch + nepoch):
+    prof.start()
     try:
       print(f"epoch {t}")
       _, avg_loss, acc = train(train_dataloader, name, model, loss_fn,
@@ -369,7 +379,9 @@ if __name__ == '__main__':
       if not os.path.isdir('checkpoint'):
         os.mkdir('checkpoint')
       torch.save(state, os.path.join('checkpoint', f"{log_name}-{t}"))
-  
+    prof.stop()
+    print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+    print(prof.key_averages().table(sort_by="cuda_time_total"))
   et = time.time()
   
   print("done!")

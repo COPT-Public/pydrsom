@@ -22,8 +22,12 @@ import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
 from pydrsom.drsom import DRSOMF
+from pydrsom.drsomnd import DRSOMF as DRSOM3
+from pydrsom.drsom_utils import *
 from .adabound import AdaBound
+from .torch_optimizer import Adahessian
 from .models import *
+from .util import *
 
 
 def get_parser():
@@ -34,8 +38,11 @@ def get_parser():
       'resnet', 'resnet18',
     ]
   )
-  parser.add_argument('--optim', default='sgd', type=str, help='optimizer',
-                      choices=['sgd', 'adagrad', 'adam', 'amsgrad', 'adabound', 'amsbound', 'drsom'])
+  parser.add_argument(
+    '--optim', default='sgd', type=str, help='optimizer',
+    choices=['sgd', 'adagrad', 'adam', 'amsgrad', 'adabound', 'amsbound', 'adahessian',
+             'drsom', 'drsomnd']
+  )
   parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
   # for adabound
   parser.add_argument('--final_lr', default=0.1, type=float,
@@ -49,6 +56,7 @@ def get_parser():
   parser.add_argument('--beta1', default=0.9, type=float, help='Adam coefficients beta_1')
   parser.add_argument('--beta2', default=0.999, type=float, help='Adam coefficients beta_2')
   parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
+  parser.add_argument('--ckpt_name', type=str, help='resume from checkpoint')
   parser.add_argument('--epoch', '-e', default=200, type=int, help='num of epoches to run')
   parser.add_argument('--weight_decay', default=5e-4, type=float,
                       help='weight decay for optimizers')
@@ -101,28 +109,6 @@ def build_dataset():
   return train_loader, test_loader
 
 
-def get_ckpt_name(model='resnet', optimizer='sgd', lr=0.1, final_lr=0.1, momentum=0.9,
-                  beta1=0.9, beta2=0.999, gamma=1e-3):
-  name = {
-    'sgd': 'lr{}-momentum{}'.format(lr, momentum),
-    'adagrad': 'lr{}'.format(lr),
-    'adam': 'lr{}-betas{}-{}'.format(lr, beta1, beta2),
-    'amsgrad': 'lr{}-betas{}-{}'.format(lr, beta1, beta2),
-    'adabound': 'lr{}-betas{}-{}-final_lr{}-gamma{}'.format(lr, beta1, beta2, final_lr, gamma),
-    'amsbound': 'lr{}-betas{}-{}-final_lr{}-gamma{}'.format(lr, beta1, beta2, final_lr, gamma),
-    'drsom': 'betas{}-{}'.format(beta1, beta2),
-  }[optimizer]
-  return '{}-{}-{}'.format(model, optimizer, name)
-
-
-def load_checkpoint(ckpt_name):
-  print('==> Resuming from checkpoint..')
-  path = os.path.join('checkpoint', ckpt_name)
-  assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
-  assert os.path.exists(path), 'Error: checkpoint {} not found'.format(ckpt_name)
-  return torch.load(path)
-
-
 def build_model(args, device, ckpt=None):
   print('==> Building model..')
   net = {
@@ -157,6 +143,7 @@ def create_optimizer(args, model_params):
     return AdaBound(model_params, args.lr, betas=(args.beta1, args.beta2),
                     final_lr=args.final_lr, gamma=args.gamma,
                     weight_decay=args.weight_decay)
+  # my second-order method
   elif args.optim == 'drsom':
     return DRSOMF(
       model_params,
@@ -166,68 +153,28 @@ def create_optimizer(args, model_params):
       beta2=args.drsom_beta2,
       max_iter=args.itermax
     )
+  
+  elif args.optim == 'drsomnd':
+    return DRSOM3(
+      model_params,
+      hessian_window=args.hessian_window,
+      option_tr=args.option_tr,
+      beta1=args.drsom_beta1,
+      beta2=args.drsom_beta2,
+      max_iter=args.itermax
+    )
+  # second-order method
+  elif args.optim == 'adahessian':
+    return Adahessian(
+      model_params,
+      lr=1.0,
+      betas=(0.9, 0.999),
+      eps=1e-4,
+      weight_decay=0.0,
+      hessian_power=1.0,
+    )
   else:
     raise ValueError(f"Optimizer {args.optim} not defined")
-
-
-def train(net, epoch, device, data_loader, name, optimizer, criterion):
-  print('\nEpoch: %d' % epoch)
-  net.train()
-  train_loss = 0
-  correct = 0
-  total = 0
-  size = len(data_loader.dataset)
-  for batch_idx, (inputs, targets) in enumerate(data_loader):
-    inputs, targets = inputs.to(device), targets.to(device)
-    
-    def closure(backward=True):
-      optimizer.zero_grad()
-      outputs = net(inputs)
-      loss = criterion(outputs, targets)
-      if not backward:
-        return loss
-      if name in {'drsom'}:
-        loss.backward(create_graph=True)
-      else:
-        loss.backward()
-      return loss
-    
-    loss = optimizer.step(closure=closure)
-    outputs = net(inputs)
-    train_loss += loss.item()
-    _, predicted = outputs.max(1)
-    total += targets.size(0)
-    correct += predicted.eq(targets).sum().item()
-    if batch_idx % 20 == 0:
-      loss, current = loss.item(), batch_idx * len(inputs)
-      print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-  
-  accuracy = 100. * correct / total
-  print('train acc %.3f' % accuracy)
-  
-  return accuracy, train_loss / len(data_loader)
-
-
-def test(net, device, data_loader, criterion):
-  net.eval()
-  test_loss = 0
-  correct = 0
-  total = 0
-  with torch.no_grad():
-    for batch_idx, (inputs, targets) in enumerate(data_loader):
-      inputs, targets = inputs.to(device), targets.to(device)
-      outputs = net(inputs)
-      loss = criterion(outputs, targets)
-      
-      test_loss += loss.item()
-      _, predicted = outputs.max(1)
-      total += targets.size(0)
-      correct += predicted.eq(targets).sum().item()
-  
-  accuracy = 100. * correct / total
-  print(' test acc %.3f' % accuracy)
-  
-  return accuracy, test_loss / len(data_loader)
 
 
 def main():
@@ -238,37 +185,42 @@ def main():
   train_loader, test_loader = build_dataset()
   device = 'cuda' if torch.cuda.is_available() else 'cpu'
   
-  ckpt_name = get_ckpt_name(
-    model=args.model, optimizer=args.optim, lr=args.lr,
-    final_lr=args.final_lr, momentum=args.momentum,
-    beta1=args.beta1, beta2=args.beta2, gamma=args.gamma
-  )
   if args.resume:
-    ckpt = load_checkpoint(ckpt_name)
-    best_acc = ckpt['acc']
+    ckpt = load_checkpoint(args.ckpt_name)
     start_epoch = ckpt['epoch']
   else:
     ckpt = None
-    best_acc = 0
-    start_epoch = -1
+    start_epoch = 0
   
   net = build_model(args, device, ckpt=ckpt)
   criterion = nn.CrossEntropyLoss()
   optimizer = create_optimizer(args, net.parameters())
-  if args.optim not in ['drsom']:
+  
+  if args.optim.startswith("drsom"):
+    # get a scheduler
+    pass
+  else:
+    # get a scheduler
     scheduler = optim.lr_scheduler.StepLR(
       optimizer, step_size=args.lrstep, gamma=0.5,
       last_epoch=start_epoch
     )
   
-  train_accuracies = []
-  test_accuracies = []
-  print(f"lambda increased factor {args.gamma_power}")
-  if args.optim in ['drsom']: 
-    gammabase = optimizer.gammalb
-  for epoch in range(start_epoch + 1, args.epoch):
-    if args.optim in ['drsom']:
-      
+  if args.optim.startswith("drsom"):
+    log_name = query_name(optimizer, args.optim, args, ckpt)
+  else:
+    log_name = get_ckpt_name(
+      model=args.model, optimizer=args.optim, lr=args.lr,
+      final_lr=args.final_lr, momentum=args.momentum,
+      beta1=args.beta1, beta2=args.beta2, gamma=args.gamma
+    )
+  
+  print(f"Using optimizer:\n {log_name}")
+  
+  gammabase = optimizer.gammalb if args.optim.startswith("drsom") else 0
+  for epoch in range(start_epoch, start_epoch + args.epoch):
+    if args.optim.startswith("drsom"):
+      print(f"lambda increased factor {args.gamma_power}")
       optimizer.gammalb = gammabase * args.gamma_power ** ((epoch + 1) // args.lrstep)
       print(f"gamma lower bound changed to {optimizer.gammalb}")
     
@@ -279,14 +231,15 @@ def main():
     test_acc, test_loss = test(net, device, test_loader, criterion)
     
     # writer
-    writer.add_scalars("Accuracy/train", {f'{args.optim}-{args.lrstep}': train_acc}, epoch)
-    writer.add_scalars("Loss/train", {f'{args.optim}-{args.lrstep}': train_loss}, epoch)
-    writer.add_scalars("Accuracy/test", {f"{args.optim}-{args.lrstep}": test_acc}, epoch)
-    writer.add_scalars("Loss/test", {f"{args.optim}-{args.lrstep}": test_loss}, epoch)
+    writer.add_scalars("Accuracy/train", {f'{log_name}-sc:{args.lrstep}': train_acc}, epoch)
+    writer.add_scalars("Loss/train", {f'{log_name}-sc:{args.lrstep}': train_loss}, epoch)
+    writer.add_scalars("Accuracy/test", {f"{log_name}-sc:{args.lrstep}": test_acc}, epoch)
+    writer.add_scalars("Loss/test", {f"{log_name}-sc:{args.lrstep}": test_loss}, epoch)
     
     # Save checkpoint.
-    if test_acc > best_acc:
+    if epoch % 5 == 0:
       print('Saving..')
+      
       state = {
         'net': net.state_dict(),
         'acc': test_acc,
@@ -294,15 +247,16 @@ def main():
       }
       if not os.path.isdir('checkpoint'):
         os.mkdir('checkpoint')
-      torch.save(state, os.path.join('checkpoint', ckpt_name))
-      best_acc = test_acc
-    
-    train_accuracies.append(train_acc)
-    test_accuracies.append(test_acc)
-    if not os.path.isdir('curve'):
-      os.mkdir('curve')
-    torch.save({'train_acc': train_accuracies, 'test_acc': test_accuracies},
-               os.path.join('curve', ckpt_name))
+      
+      torch.save(state, os.path.join('checkpoint', f"{log_name}-{epoch}"))
+      
+      #
+      # train_accuracies.append(train_acc)
+      # test_accuracies.append(test_acc)
+      # if not os.path.isdir('curve'):
+      #   os.mkdir('curve')
+      # torch.save({'train_acc': train_accuracies, 'test_acc': test_accuracies},
+      #            os.path.join('curve', ckpt_name))
 
 
 if __name__ == '__main__':
