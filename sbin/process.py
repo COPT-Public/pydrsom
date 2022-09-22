@@ -32,6 +32,7 @@ NAME = {
   'adam-40': 'Adam-40',
   'drsom-mode:0-p': "DRSOM-2D",
   'drsom-mode:1-p': "DRSOM-2D-dg",
+  'drsom-mode:2-p': "DRSOM-3D-dg",
   'drsom-mode:3-p': "DRSOM-2D-g-alone",
   'drsom-mode:3-p-r-20': "DRSOM-2D-g-alone-resume"
 }
@@ -135,3 +136,4 @@ for cat in ['train', 'test']:
     fig.update_xaxes(style_grid)
     fig.update_yaxes(style_grid)
     fig.write_image(f"{dirout}/{cat}-{metric}.png", scale=10)
+    fig.write_html(f"{dirout}/{cat}-{metric}.html")

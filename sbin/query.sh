@@ -5,6 +5,7 @@ for cat in Loss Acc; do
 		for f in adam sgd4 \
   		'drsom-mode:0-p' \
   		'drsom-mode:1-p' \
+  		'drsom-mode:2-p' \
   		'drsom-mode:3-p' \
   		'drsom-mode:3-p-r-20' \
   		; do

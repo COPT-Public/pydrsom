@@ -187,7 +187,7 @@ def main():
   
   if args.resume:
     ckpt = load_checkpoint(args.ckpt_name)
-    start_epoch = ckpt['epoch']
+    start_epoch = ckpt['epoch'] + 1
   else:
     ckpt = None
     start_epoch = 0
@@ -218,46 +218,59 @@ def main():
   print(f"Using optimizer:\n {log_name}")
   
   gammabase = optimizer.gammalb if args.optim.startswith("drsom") else 0
+  start_time = time.time()
   for epoch in range(start_epoch, start_epoch + args.epoch):
+    try:
+      if args.optim.startswith("drsom"):
+        print(f"lambda increased factor {args.gamma_power}")
+        optimizer.gammalb = gammabase * args.gamma_power ** ((epoch + 1) // args.lrstep)
+        print(f"gamma lower bound changed to {optimizer.gammalb}")
+      
+      else:
+        scheduler.step()
+      
+      train_acc, train_loss, = train(net, epoch, device, train_loader, args.optim, optimizer, criterion)
+      test_acc, test_loss = test(net, device, test_loader, criterion)
+      
+      # writer
+      writer.add_scalars("Accuracy/train", {f'{log_name}-sc:{args.lrstep}': train_acc}, epoch)
+      writer.add_scalars("Loss/train", {f'{log_name}-sc:{args.lrstep}': train_loss}, epoch)
+      writer.add_scalars("Accuracy/test", {f"{log_name}-sc:{args.lrstep}": test_acc}, epoch)
+      writer.add_scalars("Loss/test", {f"{log_name}-sc:{args.lrstep}": test_loss}, epoch)
+      
+      # Save checkpoint.
+      if epoch % 5 == 0:
+        print('Saving..')
+        
+        state = {
+          'net': net.state_dict(),
+          'acc': test_acc,
+          'epoch': epoch,
+        }
+        if not os.path.isdir('checkpoint'):
+          os.mkdir('checkpoint')
+        
+        torch.save(state, os.path.join('checkpoint', f"{log_name}-{epoch}"))
+        
+        #
+        # train_accuracies.append(train_acc)
+        # test_accuracies.append(test_acc)
+        # if not os.path.isdir('curve'):
+        #   os.mkdir('curve')
+        # torch.save({'train_acc': train_accuracies, 'test_acc': test_accuracies},
+        #            os.path.join('curve', ckpt_name))
+    except KeyboardInterrupt:
+      print(f"Exiting at {epoch}")
+      break
+    ################
+    # profile details
+    ################
     if args.optim.startswith("drsom"):
-      print(f"lambda increased factor {args.gamma_power}")
-      optimizer.gammalb = gammabase * args.gamma_power ** ((epoch + 1) // args.lrstep)
-      print(f"gamma lower bound changed to {optimizer.gammalb}")
+      print("hvp overhead")
+      print(f"time : {optimizer._total_time}")
+      print(f"call : {optimizer._count}")
+      print(f"avg  : {optimizer._total_time / optimizer._count:.2f}")
+      print(f"total: {time.time() - start_time:.2f}")
     
-    else:
-      scheduler.step()
-    
-    train_acc, train_loss, = train(net, epoch, device, train_loader, args.optim, optimizer, criterion)
-    test_acc, test_loss = test(net, device, test_loader, criterion)
-    
-    # writer
-    writer.add_scalars("Accuracy/train", {f'{log_name}-sc:{args.lrstep}': train_acc}, epoch)
-    writer.add_scalars("Loss/train", {f'{log_name}-sc:{args.lrstep}': train_loss}, epoch)
-    writer.add_scalars("Accuracy/test", {f"{log_name}-sc:{args.lrstep}": test_acc}, epoch)
-    writer.add_scalars("Loss/test", {f"{log_name}-sc:{args.lrstep}": test_loss}, epoch)
-    
-    # Save checkpoint.
-    if epoch % 5 == 0:
-      print('Saving..')
-      
-      state = {
-        'net': net.state_dict(),
-        'acc': test_acc,
-        'epoch': epoch,
-      }
-      if not os.path.isdir('checkpoint'):
-        os.mkdir('checkpoint')
-      
-      torch.save(state, os.path.join('checkpoint', f"{log_name}-{epoch}"))
-      
-      #
-      # train_accuracies.append(train_acc)
-      # test_accuracies.append(test_acc)
-      # if not os.path.isdir('curve'):
-      #   os.mkdir('curve')
-      # torch.save({'train_acc': train_accuracies, 'test_acc': test_accuracies},
-      #            os.path.join('curve', ckpt_name))
-
-
 if __name__ == '__main__':
   main()

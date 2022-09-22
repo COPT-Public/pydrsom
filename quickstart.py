@@ -156,7 +156,7 @@ def train(dataloader, name, model, loss_fn, optimizer, ninterval):
       return loss
     
     # backpropagation
-   
+    
     loss = optimizer.step(closure=closure)
     avg_loss += loss.item()
     
@@ -319,7 +319,7 @@ if __name__ == '__main__':
   
   if args.resume:
     ckpt = load_checkpoint(args.ckpt_name)
-    start_epoch = ckpt['epoch']
+    start_epoch = ckpt['epoch'] + 1
     model.load_state_dict(ckpt['net'])
   else:
     ckpt = None
@@ -338,7 +338,7 @@ if __name__ == '__main__':
   optimizer = func(model.parameters(), **func_kwargs)
   # log name
   log_name = query_name(optimizer, name, args, ckpt)
-
+  start_time = time.time()
   print(f"Using optimizer:\n {log_name}")
   for t in range(start_epoch, start_epoch + nepoch):
     try:
@@ -369,10 +369,20 @@ if __name__ == '__main__':
       if not os.path.isdir('checkpoint'):
         os.mkdir('checkpoint')
       torch.save(state, os.path.join('checkpoint', f"{log_name}-{t}"))
+    ################
+    # profile details
+    ################
+    if args.optim.startswith("drsom"):
+      print("hvp overhead")
+      print(f"time : {optimizer._total_time}")
+      print(f"call : {optimizer._count}")
+      print(f"avg  : {optimizer._total_time / optimizer._count:.2f}")
+      print(f"total: {time.time() - start_time:.2f}")
   
   et = time.time()
   
   print("done!")
+  
   subresult = {}
   subresult['info_train'] = test(train_dataloader, model, loss_fn)
   subresult['info_test'] = test(test_dataloader, model, loss_fn)

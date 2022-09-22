@@ -6,6 +6,7 @@ radius free (dimension-reduced trust-region method) DRSOM
   
 """
 import os
+import time
 from collections import deque
 from functools import reduce
 from pprint import pprint
@@ -145,6 +146,10 @@ class DRSOMF(torch.optim.Optimizer):
     self.ghg = 0.0
     # structured log line
     self.logline = None
+    #########################
+    # hvp stats
+    self._count = 0
+    self._total_time = 0.0
   
   def get_name(self):
     return f"drsom-mode:{DRSOM_MODE}-{self.option_tr}"
@@ -277,14 +282,19 @@ class DRSOMF(torch.optim.Optimizer):
     return trs_est
   
   def hv(self, gv, flag=0, index=0):
+    st = time.time()
     mul = 0.5 if flag == 1 else 1
     self.Hv[index] = self._gather_flat_grad(torch.autograd.grad(
       gv * mul, self._params,
       # create_graph=True,
       retain_graph=True
     ), target='self')
+    et = time.time()
+    self._count += 1
+    self._total_time += et - st
   
   def update_trust_region(self, flat_p, flat_g, directions):
+    st = time.time()
     with torch.enable_grad():
       __unused = flat_p
       
@@ -320,12 +330,13 @@ class DRSOMF(torch.optim.Optimizer):
       c = torch.tensor([flat_g.dot(v).detach().cpu() for v in directions], requires_grad=False)
       self.ghg = (Q[0, 0] + self.ghg * self.iter) / (self.iter + 1)
       
-      
       # compute Q/c/G
       self.Q = Q
       self.c = c
       # use generalized a'Ga <= delta
       self.G = G
+    et = time.time()
+    
   
   def normalize(self, v):
     v_norm = torch.linalg.norm(v)
@@ -359,7 +370,7 @@ class DRSOMF(torch.optim.Optimizer):
     # @note
     # no need to scale (even for gradient) since it is a new tensor.
     directions = [
-      self.normalize(- flat_g), # make sure -g is the first direction
+      self.normalize(- flat_g),  # make sure -g is the first direction
       *(self.gather_normalize(k) for k in DRSOM_DIRECTIONS)
     ]
     
@@ -379,7 +390,7 @@ class DRSOMF(torch.optim.Optimizer):
       alpha = self.alpha
       
       # build direction
-    
+      
       flat_new_d = torch.zeros_like(flat_p, requires_grad=False)
       for aa, dd in zip(alpha, directions):
         flat_new_d.add_(dd, alpha=aa)
