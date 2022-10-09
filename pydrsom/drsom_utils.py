@@ -7,8 +7,8 @@ import torch
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 DRSOM_VERBOSE = int(os.environ.get('DRSOM_VERBOSE', 0))
-DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 0))
-DRSOM_MODE_HVP = int(os.environ.get('DRSOM_MODE_HVP', 1))
+DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 3))
+DRSOM_MODE_HVP = int(os.environ.get('DRSOM_MODE_HVP', 0))
 if DRSOM_MODE == 0:
   DRSOM_DIRECTIONS = ['momentum']
 elif DRSOM_MODE == 1:

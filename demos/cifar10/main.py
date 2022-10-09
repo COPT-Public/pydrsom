@@ -22,7 +22,6 @@ import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
 from pydrsom.drsom import DRSOM
-from pydrsom.drsomnd import DRSOMF as DRSOM3
 from pydrsom.drsom_utils import *
 from .adabound import AdaBound
 from .torch_optimizer import Adahessian
@@ -154,15 +153,6 @@ def create_optimizer(args, model_params):
       max_iter=args.itermax
     )
   
-  elif args.optim == 'drsomnd':
-    return DRSOM3(
-      model_params,
-      hessian_window=args.hessian_window,
-      option_tr=args.option_tr,
-      beta1=args.drsom_beta1,
-      beta2=args.drsom_beta2,
-      max_iter=args.itermax
-    )
   # second-order method
   elif args.optim == 'adahessian':
     return Adahessian(

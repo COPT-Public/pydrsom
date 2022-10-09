@@ -1,9 +1,8 @@
 """
-DRSOM, (dimension-reduced second-order method)
+radius free (dimension-reduced trust-region method) DRSOM
 @author: Chuwen Zhang<chuwzhang@gmail.com>, Yinyu Ye<yinyu-ye@stanford.edu>
 @note:
-   (Mini-batch, Radius-Free) DRSOM.
-   block-DRSOM
+  This is a vanilla implementation of (Mini-batch, Radius-Free) DRSOM.
   
 """
 from functools import reduce
@@ -16,31 +15,30 @@ import pandas as pd
 from torch.nn.utils import parameters_to_vector
 
 from .drsom_utils import *
-from .kfac_utils import *
 
 
-class DRSOM(torch.optim.Optimizer):
+class KDRSOM(torch.optim.Optimizer):
   
   def __init__(
       self,
       model,
       max_iter=15,
+      option_tr='a',
       gamma=1e-6,
       beta1=5e1,
       beta2=3e1,
-      thetas=(0.99, 0.999),
-      eps=1e-8,
-      TCov=5,
-      som_decay=0.95,  # decay param for second-order info
-      batch_averaged=True,
-      **kwargs
+      hessian_window=1,
+      thetas=(0.99, 0.999), eps=1e-8
   ):
     """
-    The DRSOM:
+    The DRSOMF:
       Implementation of (Mini-batch) DRSOM (Dimension-Reduced Second-Order Method) in F (Radius-Free) style
     Args:
       params: model params
       max_iter: # of iteration for trust-region adjustment
+      option_tr: option of trust-region, I or G?
+               - if 'a'; G = eye(2)
+               - if 'p'; G = [-g d]'[-g d]
       gamma: lower bound for gamma
       beta1: gamma + multiplier
       beta2: gamma - multiplier
@@ -51,26 +49,7 @@ class DRSOM(torch.optim.Optimizer):
     
     defaults = dict(betas=thetas, eps=eps)
     params = model.parameters()
-    super(DRSOM, self).__init__(params, defaults)
-    self.CovAHandler = ComputeCovA()
-    self.CovGHandler = ComputeCovG()
-    self.batch_averaged = batch_averaged
-    
-    self.known_modules = {'Linear', 'Conv2d'}
-    
-    self.modules = []
-    self.grad_outputs = {}
-    
-    self.model = model
-    self._prepare_model()
-    
-    self.steps = 0
-    
-    self.m_aa, self.m_gg = {}, {}
-    self.Q_a, self.Q_g = {}, {}
-    self.d_a, self.d_g = {}, {}
-    self.som_decay = som_decay
-    self.TCov = TCov
+    super(KDRSOM, self).__init__(params, defaults)
     ##########################
     # AD hvps
     ##########################
@@ -89,6 +68,7 @@ class DRSOM(torch.optim.Optimizer):
     # frequency to update Hv (Hessian-vector product)
     self.freq = 1
     self._max_iter_adj = max_iter
+    self.option_tr = option_tr
     
     ##########################
     # global averages & keepers
@@ -127,41 +107,8 @@ class DRSOM(torch.optim.Optimizer):
     self.logline = None
     #########################
   
-  def _save_input(self, module, input):
-    if torch.is_grad_enabled() and self.steps % self.TCov == 0:
-      aa = self.CovAHandler(input[0].data, module)
-      # Initialize buffers
-      if self.steps == 0:
-        self.m_aa[module] = torch.diag(aa.new(aa.size(0)).fill_(1))
-      update_running_stat(aa, self.m_aa[module], self.som_decay)
-  
-  def _save_grad_output(self, module, grad_input, grad_output):
-    # todo, fix this
-    self.acc_stats = True
-    # Accumulate statistics for Fisher matrices
-    if self.acc_stats and self.steps % self.TCov == 0:
-      gg = self.CovGHandler(grad_output[0].data, module, self.batch_averaged)
-      # Initialize buffers
-      if self.steps == 0:
-        self.m_gg[module] = torch.diag(gg.new(gg.size(0)).fill_(1))
-      update_running_stat(gg, self.m_gg[module], self.som_decay)
-  
-  def _prepare_model(self):
-    count = 0
-    print(self.model)
-    print("=> We keep following layers in KFAC. ")
-    for module in self.model.modules():
-      classname = module.__class__.__name__
-      # print('=> We keep following layers in KFAC. <=')
-      if classname in self.known_modules:
-        self.modules.append(module)
-        module.register_forward_pre_hook(self._save_input)
-        module.register_backward_hook(self._save_grad_output)
-        print('(%s): %s' % (count, module))
-        count += 1
-  
   def get_name(self):
-    return f"drsom:d@{DRSOM_MODE}:ad@{DRSOM_MODE_HVP}"
+    return f"k-drsom:d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}"
   
   def get_params(self):
     """
@@ -174,9 +121,13 @@ class DRSOM(torch.optim.Optimizer):
   
   @torch.no_grad()
   def _set_param(self, params_data):
-    
     for p, pdata in zip(self._params, params_data):
       p.copy_(pdata)
+  
+  @torch.no_grad()
+  def _use_new_d(self, d_new):
+    for p in self._params:
+      p.add_(d_new[p])
   
   def _bool_grad_vanish(self, p):
     return p.grad is None or torch.linalg.norm(p.grad) < 1e-8
@@ -190,64 +141,13 @@ class DRSOM(torch.optim.Optimizer):
           self.state[p][k].zero_()
   
   @drsom_timer
-  def _apply_step(self, flat_p):
-    with torch.no_grad():
-      offset = 0
-      for p in self._params:
-        numel = p.numel()
-        # view as to avoid deprecated pointwise semantics
-        p.copy_(flat_p[offset:offset + numel].view_as(p))
-        offset += numel
-      assert offset == self._numel()
-  
-  @drsom_timer
-  def _save_momentum(self, *args):
+  def _save_momentum(self, vlist, key):
     """
     saving momentum
-    Args:
-      *args:
-      0 - d(x)
-      1 - d(g)
-    Returns:
-
     """
     with torch.no_grad():
-      
-      offset = 0
-      for p in self._params:
-        numel = p.numel()
-        # view as to avoid deprecated pointwise semantics
-        if 'momentum' in DRSOM_DIRECTIONS:
-          self.state[p]['momentum'].copy_(args[0][offset:offset + numel].view_as(p))
-        if 'momentum_g' in DRSOM_DIRECTIONS:
-          self.state[p]['momentum_g'].copy_(args[1][offset:offset + numel].view_as(p))
-        offset += numel
-      assert offset == self._numel()
-  
-  @drsom_timer
-  def _directional_evaluate(self, closure, flat_p):
-    self._apply_step(flat_p)
-    # evaluation
-    loss = float(closure(backward=False))
-    return loss
-  
-  def _numel(self):
-    if self._numel_cache is None:
-      self._numel_cache = reduce(lambda total, p: total + p.numel(), self._params, 0)
-    return self._numel_cache
-  
-  @drsom_timer
-  def _gather_flat_grad(self, _valid_params, target='self'):
-    if target == 'grad':
-      flat = torch.concat([p.grad.reshape(-1) for p in _valid_params])
-    elif target == 'momentum':
-      flat = torch.concat([self.state[p]['momentum'].reshape(-1) for p in _valid_params])
-    elif target == 'momentum_g':
-      flat = torch.concat([self.state[p]['momentum_g'].reshape(-1) for p in _valid_params])
-    else:
-      flat = torch.concat([p.reshape(-1) for p in _valid_params])
-    
-    return flat
+      for idx, p in enumerate(self._params):
+        self.state[p][key] = vlist[p]
   
   @torch.no_grad()
   def solve_alpha(self, Q, c, tr):
@@ -275,12 +175,13 @@ class DRSOM(torch.optim.Optimizer):
     return alpha, norm
   
   @drsom_timer
-  def compute_step(self):
+  def compute_step(self, option_tr='p'):
     # compute alpha
     
     self.alpha, self.alpha_norm = self.solve_alpha(
-        self.Q, self.c, tr=self.G
+      self.Q, self.c, tr=self.G
     )
+   
     
     ####################################
     # compute estimate decrease
@@ -290,11 +191,11 @@ class DRSOM(torch.optim.Optimizer):
     return trs_est
   
   @drsom_timer
-  def hv(self, g, v, flag=0, index=0):
+  def hv(self, p, v, flag=0, index=0):
     """
     exact metric
     Args:
-      g:
+      p:
       v:
       flag:
       index:
@@ -303,48 +204,34 @@ class DRSOM(torch.optim.Optimizer):
 
     """
     mul = 0.5 if flag == 1 else 1
-    gv = g.dot(v)
-    self.Hv[index] = self._gather_flat_grad(torch.autograd.grad(
-      gv * mul, self._params,
+    gv = torch.mul(p.grad, v).sum()
+    return torch.autograd.grad(
+      gv * mul, p,
       # create_graph=True,
       retain_graph=True
-    ), target='self')
+    )
   
   @drsom_timer
-  def hv_diff(self, flat_p, g, v, closure, flag=0, index=0, eps=1e-8):
-    """
-    finite diff
-    Args:
-      g:
-      v:
-      flag:
-      index:
-      eps
-    Returns:
-
-    """
-    mul = 0.5 if flag == 1 else 1
-    scale = 1 / eps
-    with torch.no_grad():
-      self._apply_step(eps * v + flat_p)
-    _ = closure()
-    g_eps = parameters_to_vector([p.grad for p in self._params])
-    self.Hv[index] = scale * (g_eps - g) * mul
-  
-  @drsom_timer
-  def update_trust_region(self, flat_p, flat_g, directions, closure=None, style=DRSOM_MODE_HVP):
+  def update_trust_region(self, p_copy, directions, closure=None, style=DRSOM_MODE_HVP):
     st = time.time()
     with torch.enable_grad():
-      __unused = flat_p
-      
+      __unused = p_copy
+      # each direction is a list of tensors
       dim = len(directions)
       # construct G (the inner products)
       G = torch.zeros((dim, dim), requires_grad=False, device='cpu')
-      for i, v in enumerate(directions):
+      for i in range(dim):
         for j in range(i, dim):
-          u = directions[j]
-          # compute G[i,j]
-          G[i, j] = G[j, i] = v.dot(u).detach().cpu()
+          for p in self._params:
+            v = directions[i][p]
+            u = directions[j][p]
+            # compute G[i,j]
+            G[i, j] += torch.mul(u, v).sum().detach().cpu()
+      
+      # keep symmetry
+      for i in range(dim):
+        for j in range(i):
+          G[i, j] = G[j, i]
       
       # compute Hv for v in directions;
       #   assume directions[0] = g/|g|
@@ -354,22 +241,35 @@ class DRSOM(torch.optim.Optimizer):
         #   by analytic gv
         Q = torch.zeros((dim, dim), requires_grad=False, device='cpu')
         if self.Hv is None:
-          self.Hv = [torch.empty_like(flat_g) for _ in directions]
-        for i, v in enumerate(directions):
-          if style == 0:
-            self.hv(flat_g, v, index=i)
-          elif style == 1:
-            self.hv_diff(flat_p, flat_g, v, closure, index=i)
-        for i, v in enumerate(directions):
+          self.Hv = [{p: torch.empty_like(p) for p in self._params} for _ in range(dim)]
+        for i in range(dim):
+          for p in self._params:
+            v = directions[i][p]
+            if style == 0:
+              self.Hv[i][p], *_ = self.hv(p, v, index=i)
+          # elif style == 1:
+          #   self.hv_diff(p, g, v, closure, index=i)
+        for i in range(dim):
           for j in range(i, dim):
-            Q[i, j] = Q[j, i] = v.dot(self.Hv[j]).detach().cpu()
+            for p in self._params:
+              u = directions[i][p]
+              hv = self.Hv[j][p]
+              Q[i, j] += torch.mul(u, hv).sum().detach().cpu()
+        for i in range(dim):
+          for j in range(i):
+            Q[i, j] = Q[j, i]
       else:
         # if set freq = 1
         #   this never happens
         # Q = torch.tensor([[G, 0.0], [0.0, dd]], requires_grad=False)
         raise ValueError("not handled yet")
       
-      c = torch.tensor([flat_g.dot(v).detach().cpu() for v in directions], requires_grad=False)
+      c = torch.zeros(dim, requires_grad=False, device='cpu')
+      for i in range(dim):
+        for p in self._params:
+          u = directions[i][p]
+          c[i] += torch.mul(p.grad, u).sum().cpu()
+      
       self.ghg = (Q[0, 0] + self.ghg * self.iter) / (self.iter + 1)
       
       # compute Q/c/G
@@ -384,8 +284,13 @@ class DRSOM(torch.optim.Optimizer):
     v_norm = 1 if v_norm == 0 else v_norm
     return v / v_norm
   
+  def gather_normalized_grad(self):
+    
+    # todo, should we normalize?
+    return {p: p.grad.detach().clone() for p in self._params}
+  
   def gather_normalize(self, k):
-    return self.normalize(self._gather_flat_grad([self.state[p][k] for p in self._params]))
+    return {p: self.state[p][k] for p in self._params}
   
   def step(self, closure=None):
     """
@@ -399,30 +304,29 @@ class DRSOM(torch.optim.Optimizer):
     closure = torch.enable_grad()(closure)
     if DRSOM_VERBOSE:
       torch.autograd.set_detect_anomaly(True)
-    
+    n_iter = 0
     
     loss = closure()
-    flat_p = parameters_to_vector(self._params)
+    
     # copy of it at last step
     p_copy = self._clone_param()
     
-    flat_g = parameters_to_vector([p.grad for p in self._params])
-    
     # @note
     # no need to scale (even for gradient) since it is a new tensor.
+    g_old = self.gather_normalized_grad()
     directions = [
-      self.normalize(- flat_g),  # make sure -g is the first direction
+      g_old,  # make sure -g is the first direction
       *(self.gather_normalize(k) for k in DRSOM_DIRECTIONS)
     ]
     
-    self.update_trust_region(flat_p, flat_g, directions, closure=closure, style=DRSOM_MODE_HVP)
+    self.update_trust_region(p_copy, directions, closure=closure, style=DRSOM_MODE_HVP)
     # accept or not?
     acc_step = False
     # adjust lambda: (and thus trust region radius)
     iter_adj = 1
     while iter_adj < self._max_iter_adj:
       # solve alpha
-      trs_est = self.compute_step()
+      trs_est = self.compute_step(option_tr=self.option_tr)
       if trs_est < 0:
         self.gamma = max(self.gamma * self.beta1, 1e-4)
         if DRSOM_VERBOSE:
@@ -431,16 +335,16 @@ class DRSOM(torch.optim.Optimizer):
       alpha = self.alpha
       
       # build direction
+      dim = len(directions)
+      d_new = {p: torch.zeros_like(p, requires_grad=False) for p in self._params}
+      for p in self._params:
+        for i in range(dim):
+          u = directions[i][p]
+          d_new[p].add_(u, alpha=alpha[i])
       
-      flat_new_d = torch.zeros_like(flat_p, requires_grad=False)
-      for aa, dd in zip(alpha, directions):
-        flat_new_d.add_(dd, alpha=aa)
-      
-      # new trial points
-      flat_new_p = torch.zeros_like(flat_p, requires_grad=False).copy_(flat_p).add_(flat_new_d)
-      
+      self._use_new_d(d_new)
+      loss_est = float(closure(backward=False))
       # accept or not？
-      loss_est = self._directional_evaluate(closure, flat_new_p)
       loss_dec = loss - loss_est
       rho = loss_dec / trs_est
       
@@ -479,17 +383,20 @@ class DRSOM(torch.optim.Optimizer):
       
       else:
         if 'momentum_g' in DRSOM_DIRECTIONS:
-          # compute flat_momentum_g
+          # compute momentum_g
           _loss = closure()
-          flat_g_new = parameters_to_vector([p.grad for p in self._params])
-          self._save_momentum(flat_new_d, flat_g_new - flat_g)
+          raise ValueError("not implemented")
+        elif 'momentum' in DRSOM_DIRECTIONS:
+          self._save_momentum(d_new, 'momentum')
         else:
-          self._save_momentum(flat_new_d)
+          # no momentum has to be kept
+          pass
         break
       
       iter_adj += 1
     
     self.iter += 1
+    n_iter += 1
     
     if not acc_step:
       # if this step is not acc. (after max # of iteration for adjustment)

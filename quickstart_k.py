@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 
-from pydrsom.kdrsom import DRSOM
+from pydrsom.kdrsom import KDRSOM
 from pydrsom.drsom_utils import *
 
 parser = argparse.ArgumentParser(
@@ -245,7 +245,6 @@ def test(dataloader, model, loss_fn):
 if __name__ == '__main__':
   
   args = parser.parse_args()
-  writer = SummaryWriter(log_dir=args.tflogger)
   # reproducibility
   # download training data from open datasets.
   try:
@@ -301,7 +300,7 @@ if __name__ == '__main__':
     'sgd3': torch.optim.SGD,
     'sgd4': torch.optim.SGD,
     'lbfgs': torch.optim.LBFGS,
-    'drsom': DRSOM,
+    'drsom': KDRSOM,
   }
   method_kwargs = {
     'adam':
@@ -379,6 +378,7 @@ if __name__ == '__main__':
   optimizer = func(model, **func_kwargs)
   # log name
   log_name = query_name(optimizer, name, args, ckpt)
+  writer = SummaryWriter(log_dir=os.path.join(args.tflogger, log_name))
   start_time = time.time()
   print(f"Using optimizer:\n {log_name}")
   for t in range(start_epoch, start_epoch + nepoch):
@@ -392,12 +392,12 @@ if __name__ == '__main__':
       print("-------------------------------")
       
       # train loss
-      writer.add_scalars("Loss/train", {f'{log_name}': avg_loss}, t)
-      writer.add_scalars("Acc/train", {f'{log_name}': acc}, t)
+      writer.add_scalar("Loss/train", avg_loss, t)
+      writer.add_scalar("Acc/train", acc, t)
       # test loss
       rt = test(test_dataloader, model, loss_fn)
-      writer.add_scalars("Loss/test", {f"{log_name}": rt['avg_loss']}, t)
-      writer.add_scalars("Acc/test", {f"{log_name}": rt['acc']}, t)
+      writer.add_scalar("Loss/test", rt['avg_loss'], t)
+      writer.add_scalar("Acc/test", rt['acc'], t)
     except KeyboardInterrupt as e:
       print(f"Exiting at {t}")
       break
