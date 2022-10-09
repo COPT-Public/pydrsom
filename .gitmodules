@@ -1,0 +1,3 @@
+[submodule "kfac"]
+	path = kfac
+	url = git@github.com:brentian/kfac

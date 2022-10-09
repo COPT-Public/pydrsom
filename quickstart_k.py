@@ -14,6 +14,8 @@ import argparse
 import json
 import os
 import time
+
+import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 from pprint import pprint
 
@@ -24,8 +26,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 
-from pydrsom.drsom import DRSOMF
-from pydrsom.drsomnd_profile import DRSOMF as DRSOMF3
+from pydrsom.kdrsom import DRSOM
 from pydrsom.drsom_utils import *
 
 parser = argparse.ArgumentParser(
@@ -123,8 +124,8 @@ class VanillaNetwork(nn.Module):
     
     # case II: seems ok:
     self.layers = nn.Sequential(
-      nn.Linear(28 * 28, 512),
-      nn.Linear(512, 10),
+      nn.Linear(28 * 28, 10),
+      # nn.Linear(512, 10),
     )
   
   def forward(self, x):
@@ -134,6 +135,50 @@ class VanillaNetwork(nn.Module):
 
 
 def train(dataloader, name, model, loss_fn, optimizer, ninterval):
+  if name.startswith('drsom'):
+    return train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval)
+  st = time.time()
+  size = len(dataloader.dataset)
+  model.train()
+  correct = 0
+  total = 0
+  avg_loss = 0
+  for batch, (X, y) in enumerate(dataloader):
+    X, y = X.to(device), y.to(device)
+    
+    def closure(backward=True):
+      optimizer.zero_grad()
+      output = model(X)
+      loss = loss_fn(output, y)
+      loss.backward()
+      return loss
+    
+    # backpropagation
+    
+    loss = optimizer.step(closure=closure)
+    avg_loss += loss.item()
+    
+    # compute prediction error
+    outputs = model(X)
+    _, predicted = outputs.max(1)
+    total += y.size(0)
+    correct += predicted.eq(y).sum().item()
+    
+    if batch % ninterval == 0:
+      loss, current = loss.item(), batch * len(X)
+      print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+  
+  accuracy = 100. * correct / total
+  avg_loss = avg_loss / len(dataloader)
+  print('train acc %.5f' % accuracy)
+  print('train avg_loss %.5f' % avg_loss)
+  print('train batches: ', len(dataloader))
+  
+  et = time.time()
+  return et - st, avg_loss, accuracy
+
+
+def train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval):
   st = time.time()
   size = len(dataloader.dataset)
   model.train()
@@ -149,15 +194,12 @@ def train(dataloader, name, model, loss_fn, optimizer, ninterval):
       loss = loss_fn(output, y)
       if not backward:
         return loss
-      if name.startswith('drsom'):
-        loss.backward(create_graph=True)
-      else:
-        loss.backward()
+      loss.backward(create_graph=True)
       return loss
     
     # backpropagation
     
-    loss = optimizer.step(closure=closure, profiler=prof)
+    loss = optimizer.step(closure=closure)
     avg_loss += loss.item()
     
     # compute prediction error
@@ -169,7 +211,6 @@ def train(dataloader, name, model, loss_fn, optimizer, ninterval):
     if batch % ninterval == 0:
       loss, current = loss.item(), batch * len(X)
       print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-    prof.step()
   
   accuracy = 100. * correct / total
   avg_loss = avg_loss / len(dataloader)
@@ -237,13 +278,6 @@ if __name__ == '__main__':
       download=True,
       transform=ToTensor(),
     )
-  prof = torch.profiler.profile(
-    schedule=torch.profiler.schedule(wait=0, warmup=0, active=2, repeat=0),
-    on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tflogger),
-    with_modules=True,
-    with_flops=True,
-    with_stack=True
-  )
   
   training_data.data = training_data.data[:args.data_size]
   training_data.targets = training_data.targets[:args.data_size]
@@ -267,8 +301,7 @@ if __name__ == '__main__':
     'sgd3': torch.optim.SGD,
     'sgd4': torch.optim.SGD,
     'lbfgs': torch.optim.LBFGS,
-    'drsom': DRSOMF,
-    'drsomnd': DRSOMF3,
+    'drsom': DRSOM,
   }
   method_kwargs = {
     'adam':
@@ -327,7 +360,7 @@ if __name__ == '__main__':
   
   if args.resume:
     ckpt = load_checkpoint(args.ckpt_name)
-    start_epoch = ckpt['epoch']
+    start_epoch = ckpt['epoch'] + 1
     model.load_state_dict(ckpt['net'])
   else:
     ckpt = None
@@ -343,14 +376,12 @@ if __name__ == '__main__':
   st = time.time()
   func = methods[name]
   func_kwargs = method_kwargs.get(name, {})
-  optimizer = func(model.parameters(), **func_kwargs)
+  optimizer = func(model, **func_kwargs)
   # log name
   log_name = query_name(optimizer, name, args, ckpt)
-  
+  start_time = time.time()
   print(f"Using optimizer:\n {log_name}")
-  
   for t in range(start_epoch, start_epoch + nepoch):
-    prof.start()
     try:
       print(f"epoch {t}")
       _, avg_loss, acc = train(train_dataloader, name, model, loss_fn,
@@ -379,12 +410,20 @@ if __name__ == '__main__':
       if not os.path.isdir('checkpoint'):
         os.mkdir('checkpoint')
       torch.save(state, os.path.join('checkpoint', f"{log_name}-{t}"))
-    prof.stop()
-    print(prof.key_averages().table(sort_by="self_cpu_time_total"))
-    print(prof.key_averages().table(sort_by="cuda_time_total"))
+    ################
+    # profile details
+    ################
+    if args.optim.startswith("drsom"):
+      print("|--- DRSOM COMPUTATION STATS ---")
+      stats = pd.DataFrame.from_dict(DRSOM_GLOBAL_PROFILE)
+      stats['avg'] = stats['total'] / stats['count']
+      stats = stats.sort_values(by='total', ascending=False)
+      print(stats.to_markdown())
+  
   et = time.time()
   
   print("done!")
+  
   subresult = {}
   subresult['info_train'] = test(train_dataloader, model, loss_fn)
   subresult['info_test'] = test(test_dataloader, model, loss_fn)

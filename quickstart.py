@@ -14,6 +14,8 @@ import argparse
 import json
 import os
 import time
+
+import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 from pprint import pprint
 
@@ -24,8 +26,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 
-from pydrsom.drsom import DRSOMF
-from pydrsom.drsomnd import DRSOMF as DRSOMF3
+from pydrsom.drsom import DRSOM
 from pydrsom.drsom_utils import *
 
 parser = argparse.ArgumentParser(
@@ -123,8 +124,8 @@ class VanillaNetwork(nn.Module):
     
     # case II: seems ok:
     self.layers = nn.Sequential(
-      nn.Linear(28 * 28, 512),
-      nn.Linear(512, 10),
+      nn.Linear(28 * 28, 10),
+      # nn.Linear(512, 10),
     )
   
   def forward(self, x):
@@ -134,6 +135,50 @@ class VanillaNetwork(nn.Module):
 
 
 def train(dataloader, name, model, loss_fn, optimizer, ninterval):
+  if name.startswith('drsom'):
+    return train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval)
+  st = time.time()
+  size = len(dataloader.dataset)
+  model.train()
+  correct = 0
+  total = 0
+  avg_loss = 0
+  for batch, (X, y) in enumerate(dataloader):
+    X, y = X.to(device), y.to(device)
+    
+    def closure(backward=True):
+      optimizer.zero_grad()
+      output = model(X)
+      loss = loss_fn(output, y)
+      loss.backward()
+      return loss
+    
+    # backpropagation
+    
+    loss = optimizer.step(closure=closure)
+    avg_loss += loss.item()
+    
+    # compute prediction error
+    outputs = model(X)
+    _, predicted = outputs.max(1)
+    total += y.size(0)
+    correct += predicted.eq(y).sum().item()
+    
+    if batch % ninterval == 0:
+      loss, current = loss.item(), batch * len(X)
+      print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+  
+  accuracy = 100. * correct / total
+  avg_loss = avg_loss / len(dataloader)
+  print('train acc %.5f' % accuracy)
+  print('train avg_loss %.5f' % avg_loss)
+  print('train batches: ', len(dataloader))
+  
+  et = time.time()
+  return et - st, avg_loss, accuracy
+
+
+def train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval):
   st = time.time()
   size = len(dataloader.dataset)
   model.train()
@@ -149,10 +194,7 @@ def train(dataloader, name, model, loss_fn, optimizer, ninterval):
       loss = loss_fn(output, y)
       if not backward:
         return loss
-      if name.startswith('drsom'):
-        loss.backward(create_graph=True)
-      else:
-        loss.backward()
+      loss.backward(create_graph=True)
       return loss
     
     # backpropagation
@@ -259,8 +301,7 @@ if __name__ == '__main__':
     'sgd3': torch.optim.SGD,
     'sgd4': torch.optim.SGD,
     'lbfgs': torch.optim.LBFGS,
-    'drsom': DRSOMF,
-    'drsomnd': DRSOMF3,
+    'drsom': DRSOM,
   }
   method_kwargs = {
     'adam':
@@ -373,11 +414,11 @@ if __name__ == '__main__':
     # profile details
     ################
     if args.optim.startswith("drsom"):
-      print("hvp overhead")
-      print(f"time : {optimizer._total_time}")
-      print(f"call : {optimizer._count}")
-      print(f"avg  : {optimizer._total_time / optimizer._count:.2f}")
-      print(f"total: {time.time() - start_time:.2f}")
+      print("|--- DRSOM COMPUTATION STATS ---")
+      stats = pd.DataFrame.from_dict(DRSOM_GLOBAL_PROFILE)
+      stats['avg'] = stats['total'] / stats['count']
+      stats = stats.sort_values(by='total', ascending=False)
+      print(stats.to_markdown())
   
   et = time.time()
   

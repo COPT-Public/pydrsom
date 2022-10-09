@@ -1,85 +1,46 @@
 """
-radius free (dimension-reduced trust-region method) DRSOM
+DRSOM, (dimension-reduced second-order method)
 @author: Chuwen Zhang<chuwzhang@gmail.com>, Yinyu Ye<yinyu-ye@stanford.edu>
 @note:
-  This is a vanilla implementation of (Mini-batch, Radius-Free) DRSOM.
+   (Mini-batch, Radius-Free) DRSOM.
+   block-DRSOM
   
 """
-import os
-from collections import deque
 from functools import reduce
 from pprint import pprint
 from typing import Optional
-
+import torch
 import numpy as np
 import pandas as pd
-import torch
+
 from torch.nn.utils import parameters_to_vector
 
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
-DRSOM_VERBOSE = int(os.environ.get('DRSOM_VERBOSE', 0))
-DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 0))
-if DRSOM_MODE == 0:
-  DRSOM_DIRECTIONS = ['momentum']
-elif DRSOM_MODE == 1:
-  DRSOM_DIRECTIONS = ['momentum_g']
-elif DRSOM_MODE == 2:
-  DRSOM_DIRECTIONS = ['momentum_g', 'momentum']
-elif DRSOM_MODE == 3:
-  DRSOM_DIRECTIONS = []
-else:
-  raise ValueError("invalid selection of mode")
+from .drsom_utils import *
+from .kfac_utils import *
 
 
-def _norm(alpha, tr):
-  return (tr @ alpha).dot(alpha).sqrt()
-
-
-def _compute_root(Q, c, gamma, tr=torch.eye(2)):
-  lsolve = torch.linalg.solve
-  
-  D, V = torch.linalg.eigh(Q)
-  
-  lmin, lmax = min(D), max(D)
-  lb = max(0, -lmin.item())
-  lmax = lmax.item() if lmax > lb else lb + 1e4
-  _lmb_this = gamma * lmax + max(1 - gamma, 0) * lb
-  it = 0
-  try:
-    alpha = lsolve(Q + tr * _lmb_this, -c)
-  except torch.linalg.LinAlgError as e:
-    print(e)
-    print(Q, tr, _lmb_this, -c)
-    # todo, can we do better
-    alpha = lsolve(Q + tr * (_lmb_this + 1e-4), -c)
-  
-  norm = _norm(alpha, tr)
-  
-  return it, _lmb_this, alpha, norm, True
-
-
-class DRSOMF(torch.optim.Optimizer):
+class DRSOM(torch.optim.Optimizer):
   
   def __init__(
       self,
-      params,
+      model,
       max_iter=15,
-      option_tr='a',
       gamma=1e-6,
       beta1=5e1,
       beta2=3e1,
-      hessian_window=1,
-      thetas=(0.99, 0.999), eps=1e-8
+      thetas=(0.99, 0.999),
+      eps=1e-8,
+      TCov=5,
+      som_decay=0.95,  # decay param for second-order info
+      batch_averaged=True,
+      **kwargs
   ):
     """
-    The DRSOMF:
+    The DRSOM:
       Implementation of (Mini-batch) DRSOM (Dimension-Reduced Second-Order Method) in F (Radius-Free) style
     Args:
       params: model params
       max_iter: # of iteration for trust-region adjustment
-      option_tr: option of trust-region, I or G?
-               - if 'a'; G = eye(2)
-               - if 'p'; G = [-g d]'[-g d]
       gamma: lower bound for gamma
       beta1: gamma + multiplier
       beta2: gamma - multiplier
@@ -89,7 +50,27 @@ class DRSOMF(torch.optim.Optimizer):
     """
     
     defaults = dict(betas=thetas, eps=eps)
-    super(DRSOMF, self).__init__(params, defaults)
+    params = model.parameters()
+    super(DRSOM, self).__init__(params, defaults)
+    self.CovAHandler = ComputeCovA()
+    self.CovGHandler = ComputeCovG()
+    self.batch_averaged = batch_averaged
+    
+    self.known_modules = {'Linear', 'Conv2d'}
+    
+    self.modules = []
+    self.grad_outputs = {}
+    
+    self.model = model
+    self._prepare_model()
+    
+    self.steps = 0
+    
+    self.m_aa, self.m_gg = {}, {}
+    self.Q_a, self.Q_g = {}, {}
+    self.d_a, self.d_g = {}, {}
+    self.som_decay = som_decay
+    self.TCov = TCov
     ##########################
     # AD hvps
     ##########################
@@ -108,7 +89,6 @@ class DRSOMF(torch.optim.Optimizer):
     # frequency to update Hv (Hessian-vector product)
     self.freq = 1
     self._max_iter_adj = max_iter
-    self.option_tr = option_tr
     
     ##########################
     # global averages & keepers
@@ -145,9 +125,43 @@ class DRSOMF(torch.optim.Optimizer):
     self.ghg = 0.0
     # structured log line
     self.logline = None
+    #########################
+  
+  def _save_input(self, module, input):
+    if torch.is_grad_enabled() and self.steps % self.TCov == 0:
+      aa = self.CovAHandler(input[0].data, module)
+      # Initialize buffers
+      if self.steps == 0:
+        self.m_aa[module] = torch.diag(aa.new(aa.size(0)).fill_(1))
+      update_running_stat(aa, self.m_aa[module], self.som_decay)
+  
+  def _save_grad_output(self, module, grad_input, grad_output):
+    # todo, fix this
+    self.acc_stats = True
+    # Accumulate statistics for Fisher matrices
+    if self.acc_stats and self.steps % self.TCov == 0:
+      gg = self.CovGHandler(grad_output[0].data, module, self.batch_averaged)
+      # Initialize buffers
+      if self.steps == 0:
+        self.m_gg[module] = torch.diag(gg.new(gg.size(0)).fill_(1))
+      update_running_stat(gg, self.m_gg[module], self.som_decay)
+  
+  def _prepare_model(self):
+    count = 0
+    print(self.model)
+    print("=> We keep following layers in KFAC. ")
+    for module in self.model.modules():
+      classname = module.__class__.__name__
+      # print('=> We keep following layers in KFAC. <=')
+      if classname in self.known_modules:
+        self.modules.append(module)
+        module.register_forward_pre_hook(self._save_input)
+        module.register_backward_hook(self._save_grad_output)
+        print('(%s): %s' % (count, module))
+        count += 1
   
   def get_name(self):
-    return f"drsom-mode:{DRSOM_MODE}-{self.option_tr}"
+    return f"drsom:d@{DRSOM_MODE}:ad@{DRSOM_MODE_HVP}"
   
   def get_params(self):
     """
@@ -175,6 +189,7 @@ class DRSOMF(torch.optim.Optimizer):
         if k in self.state[p]:
           self.state[p][k].zero_()
   
+  @drsom_timer
   def _apply_step(self, flat_p):
     with torch.no_grad():
       offset = 0
@@ -185,6 +200,7 @@ class DRSOMF(torch.optim.Optimizer):
         offset += numel
       assert offset == self._numel()
   
+  @drsom_timer
   def _save_momentum(self, *args):
     """
     saving momentum
@@ -208,6 +224,7 @@ class DRSOMF(torch.optim.Optimizer):
         offset += numel
       assert offset == self._numel()
   
+  @drsom_timer
   def _directional_evaluate(self, closure, flat_p):
     self._apply_step(flat_p)
     # evaluation
@@ -219,6 +236,7 @@ class DRSOMF(torch.optim.Optimizer):
       self._numel_cache = reduce(lambda total, p: total + p.numel(), self._params, 0)
     return self._numel_cache
   
+  @drsom_timer
   def _gather_flat_grad(self, _valid_params, target='self'):
     if target == 'grad':
       flat = torch.concat([p.grad.reshape(-1) for p in _valid_params])
@@ -239,12 +257,12 @@ class DRSOMF(torch.optim.Optimizer):
       lmd = 0.0
       alpha = torch.zeros_like(c)
       alpha[0] = -c[0] / Q[0, 0] / (1 + self.gamma) if Q[0, 0] > 0 else 1e-4
-      norm = _norm(alpha, tr)
+      norm = TRS._norm(alpha, tr)
       if norm > self.delta_max:
         alpha = alpha / alpha.norm() * self.delta_max
     else:
       # apply root-finding
-      it, lmd, alpha, norm, active = _compute_root(Q, c, self.gamma, tr)
+      it, lmd, alpha, norm, active = TRS._compute_root(Q, c, self.gamma, tr)
     
     if DRSOM_VERBOSE:
       self.logline = {
@@ -256,18 +274,13 @@ class DRSOMF(torch.optim.Optimizer):
       }
     return alpha, norm
   
-  def compute_step(self, option_tr='p'):
+  @drsom_timer
+  def compute_step(self):
     # compute alpha
-    if option_tr == 'a':
-      self.alpha, self.alpha_norm = self.solve_alpha(
-        self.Q, self.c, tr=torch.eye(len(self.c))
-      )
-    elif option_tr == 'p':
-      self.alpha, self.alpha_norm = self.solve_alpha(
+    
+    self.alpha, self.alpha_norm = self.solve_alpha(
         self.Q, self.c, tr=self.G
-      )
-    else:
-      raise ValueError(f"unknown option for trust-region option: {option_tr}")
+    )
     
     ####################################
     # compute estimate decrease
@@ -276,15 +289,51 @@ class DRSOMF(torch.optim.Optimizer):
     
     return trs_est
   
-  def hv(self, gv, flag=0, index=0):
+  @drsom_timer
+  def hv(self, g, v, flag=0, index=0):
+    """
+    exact metric
+    Args:
+      g:
+      v:
+      flag:
+      index:
+
+    Returns:
+
+    """
     mul = 0.5 if flag == 1 else 1
+    gv = g.dot(v)
     self.Hv[index] = self._gather_flat_grad(torch.autograd.grad(
       gv * mul, self._params,
       # create_graph=True,
       retain_graph=True
     ), target='self')
   
-  def update_trust_region(self, flat_p, flat_g, directions):
+  @drsom_timer
+  def hv_diff(self, flat_p, g, v, closure, flag=0, index=0, eps=1e-8):
+    """
+    finite diff
+    Args:
+      g:
+      v:
+      flag:
+      index:
+      eps
+    Returns:
+
+    """
+    mul = 0.5 if flag == 1 else 1
+    scale = 1 / eps
+    with torch.no_grad():
+      self._apply_step(eps * v + flat_p)
+    _ = closure()
+    g_eps = parameters_to_vector([p.grad for p in self._params])
+    self.Hv[index] = scale * (g_eps - g) * mul
+  
+  @drsom_timer
+  def update_trust_region(self, flat_p, flat_g, directions, closure=None, style=DRSOM_MODE_HVP):
+    st = time.time()
     with torch.enable_grad():
       __unused = flat_p
       
@@ -307,7 +356,10 @@ class DRSOMF(torch.optim.Optimizer):
         if self.Hv is None:
           self.Hv = [torch.empty_like(flat_g) for _ in directions]
         for i, v in enumerate(directions):
-          self.hv(flat_g.dot(v), index=i)
+          if style == 0:
+            self.hv(flat_g, v, index=i)
+          elif style == 1:
+            self.hv_diff(flat_p, flat_g, v, closure, index=i)
         for i, v in enumerate(directions):
           for j in range(i, dim):
             Q[i, j] = Q[j, i] = v.dot(self.Hv[j]).detach().cpu()
@@ -320,12 +372,12 @@ class DRSOMF(torch.optim.Optimizer):
       c = torch.tensor([flat_g.dot(v).detach().cpu() for v in directions], requires_grad=False)
       self.ghg = (Q[0, 0] + self.ghg * self.iter) / (self.iter + 1)
       
-      
       # compute Q/c/G
       self.Q = Q
       self.c = c
       # use generalized a'Ga <= delta
       self.G = G
+    et = time.time()
   
   def normalize(self, v):
     v_norm = torch.linalg.norm(v)
@@ -335,7 +387,7 @@ class DRSOMF(torch.optim.Optimizer):
   def gather_normalize(self, k):
     return self.normalize(self._gather_flat_grad([self.state[p][k] for p in self._params]))
   
-  def step(self, closure=None, profiler=None):
+  def step(self, closure=None):
     """
     Performs a single optimization step.
     Arguments:
@@ -347,7 +399,7 @@ class DRSOMF(torch.optim.Optimizer):
     closure = torch.enable_grad()(closure)
     if DRSOM_VERBOSE:
       torch.autograd.set_detect_anomaly(True)
-    n_iter = 0
+    
     
     loss = closure()
     flat_p = parameters_to_vector(self._params)
@@ -359,22 +411,18 @@ class DRSOMF(torch.optim.Optimizer):
     # @note
     # no need to scale (even for gradient) since it is a new tensor.
     directions = [
-      self.normalize(- flat_g), # make sure -g is the first direction
+      self.normalize(- flat_g),  # make sure -g is the first direction
       *(self.gather_normalize(k) for k in DRSOM_DIRECTIONS)
     ]
-    from torch.profiler import record_function
     
-    with record_function("drsom::hvp-construct-qp"):
-      self.update_trust_region(flat_p, flat_g, directions)
+    self.update_trust_region(flat_p, flat_g, directions, closure=closure, style=DRSOM_MODE_HVP)
     # accept or not?
     acc_step = False
     # adjust lambda: (and thus trust region radius)
     iter_adj = 1
     while iter_adj < self._max_iter_adj:
-     
-      with record_function("drsom::trs"):
-        # solve alpha
-        trs_est = self.compute_step(option_tr=self.option_tr)
+      # solve alpha
+      trs_est = self.compute_step()
       if trs_est < 0:
         self.gamma = max(self.gamma * self.beta1, 1e-4)
         if DRSOM_VERBOSE:
@@ -384,30 +432,27 @@ class DRSOMF(torch.optim.Optimizer):
       
       # build direction
       
-      with record_function("drsom::init-direction"):
-
-        flat_new_d = torch.zeros_like(flat_p, requires_grad=False)
-        for aa, dd in zip(alpha, directions):
-          flat_new_d.add_(dd, alpha=aa)
+      flat_new_d = torch.zeros_like(flat_p, requires_grad=False)
+      for aa, dd in zip(alpha, directions):
+        flat_new_d.add_(dd, alpha=aa)
       
-          # new trial points
-          flat_new_p = torch.zeros_like(flat_p, requires_grad=False).copy_(flat_p).add_(flat_new_d)
+      # new trial points
+      flat_new_p = torch.zeros_like(flat_p, requires_grad=False).copy_(flat_p).add_(flat_new_d)
       
-      with record_function("drsom::eval"):
-        # accept or not？
-        loss_est = self._directional_evaluate(closure, flat_new_p)
-        loss_dec = loss - loss_est
-        rho = loss_dec / trs_est
-        
-        # update the trust-region radius (implicitly by gamma/lambda)
-        lmb_dec = 0
-        gamma_old = self.gamma
-        if rho <= self.zeta1:
-          self.gamma = max(self.gamma * self.beta1, 1e-4)
-        else:
-          if rho >= self.zeta2:
-            lmb_dec = 1
-            self.gamma = max(self.gammalb, min(self.gamma / self.beta2, np.log(self.gamma)))
+      # accept or not？
+      loss_est = self._directional_evaluate(closure, flat_new_p)
+      loss_dec = loss - loss_est
+      rho = loss_dec / trs_est
+      
+      # update the trust-region radius (implicitly by gamma/lambda)
+      lmb_dec = 0
+      gamma_old = self.gamma
+      if rho <= self.zeta1:
+        self.gamma = max(self.gamma * self.beta1, 1e-4)
+      else:
+        if rho >= self.zeta2:
+          lmb_dec = 1
+          self.gamma = max(self.gammalb, min(self.gamma / self.beta2, np.log(self.gamma)))
       
       acc_step = rho > self.eta
       if DRSOM_VERBOSE:
@@ -445,7 +490,6 @@ class DRSOMF(torch.optim.Optimizer):
       iter_adj += 1
     
     self.iter += 1
-    n_iter += 1
     
     if not acc_step:
       # if this step is not acc. (after max # of iteration for adjustment)

@@ -21,7 +21,7 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
-from pydrsom.drsom import DRSOMF
+from pydrsom.drsom import DRSOM
 from pydrsom.drsomnd import DRSOMF as DRSOM3
 from pydrsom.drsom_utils import *
 from .adabound import AdaBound
@@ -145,7 +145,7 @@ def create_optimizer(args, model_params):
                     weight_decay=args.weight_decay)
   # my second-order method
   elif args.optim == 'drsom':
-    return DRSOMF(
+    return DRSOM(
       model_params,
       hessian_window=args.hessian_window,
       option_tr=args.option_tr,
