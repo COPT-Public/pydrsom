@@ -26,7 +26,7 @@ def get_ckpt_name(model='resnet', optimizer='sgd', lr=0.1, final_lr=0.1, momentu
     'adabound': 'lr{}-betas{}-{}-final_lr{}-gamma{}'.format(lr, beta1, beta2, final_lr, gamma),
     'amsbound': 'lr{}-betas{}-{}-final_lr{}-gamma{}'.format(lr, beta1, beta2, final_lr, gamma),
   }[optimizer]
-  return '{}-{}-{}'.format(model, optimizer, name)
+  return '[{}]-{}-{}'.format(model, optimizer, name)
 
 
 def train(net, epoch, device, data_loader, name, optimizer, criterion):

@@ -26,7 +26,8 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 
-from pydrsom.kdrsom import KDRSOM
+from pydrsom.drsomk import DRSOMK as DRSOM
+# from pydrsom.drsomb import DRSOMB as DRSOM
 from pydrsom.drsom_utils import *
 
 parser = argparse.ArgumentParser(
@@ -300,7 +301,7 @@ if __name__ == '__main__':
     'sgd3': torch.optim.SGD,
     'sgd4': torch.optim.SGD,
     'lbfgs': torch.optim.LBFGS,
-    'drsom': KDRSOM,
+    'drsom': DRSOM,
   }
   method_kwargs = {
     'adam':

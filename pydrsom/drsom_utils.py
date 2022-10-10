@@ -4,6 +4,7 @@ import os
 import time
 
 import torch
+import numpy as np
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 DRSOM_VERBOSE = int(os.environ.get('DRSOM_VERBOSE', 0))
@@ -60,7 +61,7 @@ class TRS:
   @staticmethod
   def _norm(alpha, tr):
     return (tr @ alpha).dot(alpha).sqrt()
-
+  
   @staticmethod
   def _compute_root(Q, c, gamma, tr=torch.eye(2)):
     lsolve = torch.linalg.solve
@@ -83,3 +84,30 @@ class TRS:
     norm = TRS._norm(alpha, tr)
     
     return it, _lmb_this, alpha, norm, True
+  
+  @staticmethod
+  def _solve_alpha(optimizer, Q, c, tr):
+    dim = c.size()[0]
+    if optimizer.iter == 0 or abs(optimizer.Q[dim - 1, dim - 1]) < 1e-4:
+      lmd = 0.0
+      alpha = torch.zeros_like(c)
+      if Q[0, 0] > 0:
+        alpha[0] = - c[0] / Q[0, 0] / (1 + optimizer.gamma)
+      else:
+        alpha[0] = - 1e-3 / (1 + optimizer.gamma)
+      norm = TRS._norm(alpha, tr)
+      if norm > optimizer.delta_max:
+        alpha = alpha / alpha.norm() * optimizer.delta_max
+    else:
+      # apply root-finding
+      it, lmd, alpha, norm, active = TRS._compute_root(Q, c, optimizer.gamma, tr)
+    
+    if DRSOM_VERBOSE:
+      optimizer.logline = {
+        '𝜆': '{:+.2e}'.format(lmd),
+        'Q/c/G': np.round(np.vstack([optimizer.Q, optimizer.c, optimizer.G]), 3),
+        'a': np.array(alpha.tolist()).reshape((dim, 1)),
+        'ghg': '{:+.2e}'.format(Q[0, 0]),
+        'ghg-': '{:+.2e}'.format(optimizer.ghg),
+      }
+    return alpha, norm

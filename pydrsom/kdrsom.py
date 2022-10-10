@@ -3,7 +3,7 @@ radius free (dimension-reduced trust-region method) DRSOM
 @author: Chuwen Zhang<chuwzhang@gmail.com>, Yinyu Ye<yinyu-ye@stanford.edu>
 @note:
   This is a vanilla implementation of (Mini-batch, Radius-Free) DRSOM.
-  
+
 """
 from functools import reduce
 from pprint import pprint
@@ -156,7 +156,7 @@ class KDRSOM(torch.optim.Optimizer):
     if self.iter == 0 or self.Q[dim - 1, dim - 1] < 1e-4:
       lmd = 0.0
       alpha = torch.zeros_like(c)
-      alpha[0] = -c[0] / Q[0, 0] / (1 + self.gamma) if Q[0, 0] > 0 else 1e-4
+      alpha[0] = -c[0] / Q[0, 0] / (1 + self.gamma) if Q[0, 0] > 0 else - 1e-4 / (1 + self.gamma)
       norm = TRS._norm(alpha, tr)
       if norm > self.delta_max:
         alpha = alpha / alpha.norm() * self.delta_max
@@ -181,7 +181,6 @@ class KDRSOM(torch.optim.Optimizer):
     self.alpha, self.alpha_norm = self.solve_alpha(
       self.Q, self.c, tr=self.G
     )
-   
     
     ####################################
     # compute estimate decrease

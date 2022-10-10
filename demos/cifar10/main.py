@@ -22,6 +22,7 @@ import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
 from pydrsom.drsom import DRSOM
+from pydrsom.drsomk import DRSOMK
 from pydrsom.drsom_utils import *
 from .adabound import AdaBound
 from .torch_optimizer import Adahessian
@@ -40,7 +41,7 @@ def get_parser():
   parser.add_argument(
     '--optim', default='sgd', type=str, help='optimizer',
     choices=['sgd', 'adagrad', 'adam', 'amsgrad', 'adabound', 'amsbound', 'adahessian',
-             'drsom', 'drsomnd']
+             'drsom', 'drsomk']
   )
   parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
   # for adabound
@@ -126,7 +127,8 @@ def build_model(args, device, ckpt=None):
   return net
 
 
-def create_optimizer(args, model_params):
+def create_optimizer(args, model):
+  model_params = model.parameters()
   if args.optim == 'sgd':
     return optim.SGD(model_params, args.lr, momentum=args.momentum,
                      weight_decay=args.weight_decay)
@@ -142,17 +144,6 @@ def create_optimizer(args, model_params):
     return AdaBound(model_params, args.lr, betas=(args.beta1, args.beta2),
                     final_lr=args.final_lr, gamma=args.gamma,
                     weight_decay=args.weight_decay)
-  # my second-order method
-  elif args.optim == 'drsom':
-    return DRSOM(
-      model_params,
-      hessian_window=args.hessian_window,
-      option_tr=args.option_tr,
-      beta1=args.drsom_beta1,
-      beta2=args.drsom_beta2,
-      max_iter=args.itermax
-    )
-  
   # second-order method
   elif args.optim == 'adahessian':
     return Adahessian(
@@ -163,6 +154,25 @@ def create_optimizer(args, model_params):
       weight_decay=0.0,
       hessian_power=1.0,
     )
+  # my second-order method
+  elif args.optim == 'drsom':
+    return DRSOM(
+      model_params,
+      hessian_window=args.hessian_window,
+      option_tr=args.option_tr,
+      beta1=args.drsom_beta1,
+      beta2=args.drsom_beta2,
+      max_iter=args.itermax
+    )
+  elif args.optim == 'drsomk':
+    return DRSOMK(
+      model,
+      hessian_window=args.hessian_window,
+      option_tr=args.option_tr,
+      beta1=args.drsom_beta1,
+      beta2=args.drsom_beta2,
+      max_iter=args.itermax
+    )
   else:
     raise ValueError(f"Optimizer {args.optim} not defined")
 
@@ -171,7 +181,6 @@ def main():
   parser = get_parser()
   args = parser.parse_args()
   print(json.dumps(args.__dict__, indent=2))
-  writer = SummaryWriter(log_dir=args.tflogger)
   train_loader, test_loader = build_dataset()
   device = 'cuda' if torch.cuda.is_available() else 'cpu'
   
@@ -184,7 +193,7 @@ def main():
   
   net = build_model(args, device, ckpt=ckpt)
   criterion = nn.CrossEntropyLoss()
-  optimizer = create_optimizer(args, net.parameters())
+  optimizer = create_optimizer(args, net)
   
   if args.optim.startswith("drsom"):
     # get a scheduler
@@ -193,20 +202,21 @@ def main():
     # get a scheduler
     scheduler = optim.lr_scheduler.StepLR(
       optimizer, step_size=args.lrstep, gamma=0.5,
-      last_epoch=start_epoch
+      last_epoch=start_epoch - 1
     )
   
   if args.optim.startswith("drsom"):
-    log_name = query_name(optimizer, args.optim, args, ckpt)
+    log_name = f"[{args.model}]" + "-" + query_name(optimizer, args.optim, args, ckpt)
   else:
     log_name = get_ckpt_name(
       model=args.model, optimizer=args.optim, lr=args.lr,
       final_lr=args.final_lr, momentum=args.momentum,
       beta1=args.beta1, beta2=args.beta2, gamma=args.gamma
     )
-  
+  print(f"Using model: {args.model}")
   print(f"Using optimizer:\n {log_name}")
   
+  writer = SummaryWriter(log_dir=os.path.join(args.tflogger, log_name))
   gammabase = optimizer.gammalb if args.optim.startswith("drsom") else 0
   start_time = time.time()
   for epoch in range(start_epoch, start_epoch + args.epoch):
@@ -223,10 +233,10 @@ def main():
       test_acc, test_loss = test(net, device, test_loader, criterion)
       
       # writer
-      writer.add_scalars("Accuracy/train", {f'{log_name}-sc:{args.lrstep}': train_acc}, epoch)
-      writer.add_scalars("Loss/train", {f'{log_name}-sc:{args.lrstep}': train_loss}, epoch)
-      writer.add_scalars("Accuracy/test", {f"{log_name}-sc:{args.lrstep}": test_acc}, epoch)
-      writer.add_scalars("Loss/test", {f"{log_name}-sc:{args.lrstep}": test_loss}, epoch)
+      writer.add_scalar("Acc/train", train_acc, epoch)
+      writer.add_scalar("Loss/train", train_loss, epoch)
+      writer.add_scalar("Acc/test", test_acc, epoch)
+      writer.add_scalar("Loss/test", test_loss, epoch)
       
       # Save checkpoint.
       if epoch % 5 == 0:
@@ -242,13 +252,16 @@ def main():
         
         torch.save(state, os.path.join('checkpoint', f"{log_name}-{epoch}"))
         
-        #
+        ######################################
         # train_accuracies.append(train_acc)
         # test_accuracies.append(test_acc)
         # if not os.path.isdir('curve'):
         #   os.mkdir('curve')
         # torch.save({'train_acc': train_accuracies, 'test_acc': test_accuracies},
         #            os.path.join('curve', ckpt_name))
+        #######################################
+        
+        
     except KeyboardInterrupt:
       print(f"Exiting at {epoch}")
       break
@@ -256,11 +269,13 @@ def main():
     # profile details
     ################
     if args.optim.startswith("drsom"):
-      print("hvp overhead")
-      print(f"time : {optimizer._total_time}")
-      print(f"call : {optimizer._count}")
-      print(f"avg  : {optimizer._total_time / optimizer._count:.2f}")
-      print(f"total: {time.time() - start_time:.2f}")
-    
+      import pandas as pd
+      print("|--- DRSOM COMPUTATION STATS ---")
+      stats = pd.DataFrame.from_dict(DRSOM_GLOBAL_PROFILE)
+      stats['avg'] = stats['total'] / stats['count']
+      stats = stats.sort_values(by='total', ascending=False)
+      print(stats.to_markdown())
+
+
 if __name__ == '__main__':
   main()
