@@ -26,8 +26,9 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 
-from pydrsom.drsomk import DRSOMK as DRSOM
-# from pydrsom.drsomb import DRSOMB as DRSOM
+# from legacy.kdrsom import KDRSOM as DRSOM
+# from pydrsom.drsomk import DRSOMK as DRSOM
+from pydrsom.drsomb import DRSOMB as DRSOM
 from pydrsom.drsom_utils import *
 
 parser = argparse.ArgumentParser(

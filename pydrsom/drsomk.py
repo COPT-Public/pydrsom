@@ -226,7 +226,7 @@ class DRSOMK(torch.optim.Optimizer):
         for i in range(dim):
           for p in self._params:
             v = directions[i][p]
-          if style == 0:
+            if style == 0:
               self.Hv[i][p], *_ = self.hv(p, v, index=i)
           # elif style == 1:
           #   self.hv_diff(p, g, v, closure, index=i)

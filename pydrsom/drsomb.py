@@ -161,7 +161,7 @@ class DRSOMB(torch.optim.Optimizer):
     self.alpha, self.alpha_norm = self.solve_alpha(
       self.Q, self.c, tr=self.G
     )
-   
+    
     ####################################
     # compute estimate decrease
     ####################################
@@ -180,7 +180,8 @@ class DRSOMB(torch.optim.Optimizer):
     Returns:
 
     """
-    gv = [torch.mul(p.grad, v).sum() for p, v in zip(self._params, directions)]
+    
+    gv = [torch.mul(p.grad, directions[p]).sum() for p in self._params]
     return torch.autograd.grad(
       gv, self._params,
       # create_graph=True,

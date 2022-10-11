@@ -88,13 +88,13 @@ class TRS:
   @staticmethod
   def _solve_alpha(optimizer, Q, c, tr):
     dim = c.size()[0]
-    if optimizer.iter == 0 or abs(optimizer.Q[dim - 1, dim - 1]) < 1e-4:
+    if optimizer.iter == 0 or optimizer.Q[dim - 1, dim - 1] < 1e-4:
       lmd = 0.0
       alpha = torch.zeros_like(c)
       if Q[0, 0] > 0:
         alpha[0] = - c[0] / Q[0, 0] / (1 + optimizer.gamma)
       else:
-        alpha[0] = - 1e-3 / (1 + optimizer.gamma)
+        alpha[0] = - 1e-4 / (1 + optimizer.gamma)
       norm = TRS._norm(alpha, tr)
       if norm > optimizer.delta_max:
         alpha = alpha / alpha.norm() * optimizer.delta_max

@@ -110,7 +110,7 @@ class DRSOM(torch.optim.Optimizer):
     #########################
   
   def get_name(self):
-    return f"drsom:d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}"
+    return f"drsom-d@{DRSOM_MODE}.{self.option_tr}-ad@{DRSOM_MODE_HVP}"
   
   def get_params(self):
     """
