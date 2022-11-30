@@ -8,7 +8,7 @@ import numpy as np
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 DRSOM_VERBOSE = int(os.environ.get('DRSOM_VERBOSE', 0))
-DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 3))
+DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 0))
 DRSOM_MODE_HVP = int(os.environ.get('DRSOM_MODE_HVP', 0))
 if DRSOM_MODE == 0:
   DRSOM_DIRECTIONS = ['momentum']
@@ -88,7 +88,7 @@ class TRS:
   @staticmethod
   def _solve_alpha(optimizer, Q, c, tr):
     dim = c.size()[0]
-    if optimizer.iter == 0 or optimizer.Q[dim - 1, dim - 1] < 1e-4:
+    if optimizer.iter == 0:  # or optimizer.Q[dim - 1, dim - 1] < 1e-4:
       lmd = 0.0
       alpha = torch.zeros_like(c)
       if Q[0, 0] > 0:

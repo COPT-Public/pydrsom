@@ -1,10 +1,10 @@
 """
-radius free (dimension-reduced trust-region method) DRSOM
+the original dimension-reduced second-order method (DRSOM) in radius free mode
 @author: Chuwen Zhang<chuwzhang@gmail.com>, Yinyu Ye<yinyu-ye@stanford.edu>
 @note:
   This is a vanilla implementation of (Mini-batch, Radius-Free) DRSOM.
   - the options to run DRSOM can be controlled by the environment variables, see `drsom_utils.py`
-  - we treat the parameters as a set of tensors
+  - we treat the parameters as a set of tensors (no flatten() anymore)
 """
 from functools import reduce
 from pprint import pprint
@@ -12,7 +12,7 @@ from typing import Optional
 import torch
 import numpy as np
 import pandas as pd
-
+from torch.profiler import profile, record_function, ProfilerActivity
 from torch.nn.utils import parameters_to_vector
 
 from .drsom_utils import *
@@ -22,7 +22,7 @@ class DRSOMB(torch.optim.Optimizer):
   
   def __init__(
       self,
-      model,
+      params,
       max_iter=15,
       option_tr='a',
       gamma=1e-6,
@@ -35,7 +35,7 @@ class DRSOMB(torch.optim.Optimizer):
     The DRSOM:
       Implementation of (Mini-batch) DRSOM (Dimension-Reduced Second-Order Method) in F (Radius-Free) style
     Args:
-      model: model params
+      model: model
       max_iter: # of iteration for trust-region adjustment
       option_tr: option of trust-region, I or G?
                - if 'a'; G = eye(2)
@@ -49,7 +49,7 @@ class DRSOMB(torch.optim.Optimizer):
     """
     
     defaults = dict(betas=thetas, eps=eps)
-    params = model.parameters()
+    # params = model.parameters()
     super(DRSOMB, self).__init__(params, defaults)
     ##########################
     # AD hvps
@@ -74,9 +74,9 @@ class DRSOMB(torch.optim.Optimizer):
     ##########################
     # global averages & keepers
     ##########################
-    self.Q: Optional[torch.Tensor] = torch.zeros((2, 2), requires_grad=False)
-    self.c: Optional[torch.Tensor] = torch.zeros(2, requires_grad=False)
-    self.G: Optional[torch.Tensor] = torch.zeros((2, 2), requires_grad=False)
+    self.Q: Optional[torch.Tensor] = torch.zeros((2, 2), requires_grad=False, device='cpu')
+    self.c: Optional[torch.Tensor] = torch.zeros(2, requires_grad=False, device='cpu')
+    self.G: Optional[torch.Tensor] = torch.zeros((2, 2), requires_grad=False, device='cpu')
     
     ##########################
     # scalar attrs
@@ -84,7 +84,7 @@ class DRSOMB(torch.optim.Optimizer):
     # total number of runs acc. all steps
     self.iter = 0
     self.alpha: Optional[torch.TensorType] = None
-    self.alpha_norm = 0.0
+    self.alpha_norm = 0.1
     # gamma & lower bound on gamma
     self.gamma = gamma
     self.gammalb = 1e-12
@@ -184,88 +184,170 @@ class DRSOMB(torch.optim.Optimizer):
     gv = [torch.mul(p.grad, directions[p]).sum() for p in self._params]
     return torch.autograd.grad(
       gv, self._params,
-      # create_graph=True,
+      create_graph=True,
       retain_graph=True
     )
   
   @drsom_timer
-  def update_trust_region(self, p_copy, directions, closure=None, style=DRSOM_MODE_HVP):
-    st = time.time()
-    with torch.enable_grad():
-      __unused = p_copy
-      # each direction is a list of tensors
-      dim = len(directions)
-      # construct G (the inner products)
-      G = torch.zeros((dim, dim), requires_grad=False, device='cpu')
-      for i in range(dim):
-        for j in range(i, dim):
-          for p in self._params:
-            v = directions[i][p]
-            u = directions[j][p]
-            # compute G[i,j]
-            G[i, j] += torch.mul(u, v).sum().detach().cpu()
-      
-      # keep symmetry
-      for i in range(dim):
-        for j in range(i):
-          G[i, j] = G[j, i]
-      
-      # compute Hv for v in directions;
-      #   assume directions[0] = g/|g|
-      if self.iter % self.freq == 0:
-        # @note:
-        #   compute Hv:
-        #   by analytic gv
-        Q = torch.zeros((dim, dim), requires_grad=False, device='cpu')
-        if self.Hv is None:
-          self.Hv = [[] for _ in range(dim)]
-        for i in range(dim):
-          if style == 0:
-            self.Hv[i] = self.hv(directions[i])
-          # elif style == 1:
-          #   self.hv_diff(p, g, v, closure, index=i)
-        for i in range(dim):
-          for j in range(i, dim):
-            for idx, p in enumerate(self._params):
-              u = directions[i][p]
-              hv = self.Hv[j][idx]
-              Q[i, j] += torch.mul(u, hv).sum().detach().cpu()
-        for i in range(dim):
-          for j in range(i):
-            Q[i, j] = Q[j, i]
-      else:
-        # if set freq = 1
-        #   this never happens
-        # Q = torch.tensor([[G, 0.0], [0.0, dd]], requires_grad=False)
-        raise ValueError("not handled yet")
-      
-      c = torch.zeros(dim, requires_grad=False, device='cpu')
-      for i in range(dim):
-        for p in self._params:
+  def compute_Q_via_hvp(self, directions, style):
+    dim = len(directions)
+    Q = torch.zeros((dim, dim), requires_grad=False, device='cpu')
+    if self.Hv is None:
+      self.Hv = [[] for _ in range(dim)]
+    for i in range(dim):
+      if style == 0:
+        self.Hv[i] = self.hv(directions[i])
+      # elif style == 1:
+      #   self.hv_diff(p, g, v, closure, index=i)
+    for i in range(dim):
+      for j in range(i, dim):
+        for idx, p in enumerate(self._params):
           u = directions[i][p]
-          c[i] += torch.mul(p.grad, u).sum().cpu()
+          hv = self.Hv[j][idx]
+          Q[i, j] += torch.mul(u, hv).sum().cpu().detach()
+    for i in range(dim):
+      for j in range(i):
+        Q[i, j] = Q[j, i]
+    return Q
+  
+  @drsom_timer
+  def build_natural_basis(self, v):
+    """
+      function build_natural_basis(v)
+          _len = length(v)
+          a = [i == j ? v[i] * v[j] / 2 : v[i] * v[j]
+               for i = 1:_len
+               for j = i:_len]
+          return a
+      end
+    Returns:
+    """
+    _len = len(v)
+    a = [v[i] * v[j] / 2 if i == j else v[i] * v[j]
+         for i in range(0, _len)
+         for j in range(i, _len)]
+    return a
+  
+  @drsom_timer
+  def compute_Q_via_interpolation(self, directions, p_copy=None, fx=0.0, closure=None, delta=1e-2):
+    dim = len(directions)
+    # compare with HVP
+    _ = closure(backward=True)
+    Q1 = self.compute_Q_via_hvp(directions, style=0)
+    q1 = Q1.triu().cpu().detach().numpy()
+    q1 = q1[q1.nonzero()]
+    # we compute 3 directions so that
+    #   Q can be determined by solving a linear system;
+    #   to this end we have to compute r*(r+1)/2 forward pass.
+    # we determine the step-sizes by using the last step length
+    #   and randomly select on the sphere.
+    k = int(dim * (dim + 1))
+    # trial step on the sphere
+    a = [np.random.normal(0, 1, size=dim) for _ in range(k)]
+    a = [np.abs(v) / np.linalg.norm(v) * delta for v in a]
+    
+    df = np.zeros((k, 1))
+    K = np.array([self.build_natural_basis(v) for v in a])
+    d_new = {p: torch.zeros_like(p, requires_grad=False) for p in self._params}
+    for j in range(k):
+      for p in self._params:
+        d_new[p].zero_()
+        for i in range(dim):
+          u = directions[i][p]
+          d_new[p].add_(u, alpha=a[j][i])
       
-      self.ghg = (Q[0, 0] + self.ghg * self.iter) / (self.iter + 1)
-      
-      # compute Q/c/G
-      self.Q = Q
-      self.c = c
-      # use generalized a'Ga <= delta
-      self.G = G
+      self._use_new_d(d_new)
+      loss_est = closure(backward=False).detach().cpu()
+      df[j] = loss_est - fx
+      # set back
+      self._set_param(p_copy)
+    
+    m, n = K.shape
+    if m == n:
+      q = np.linalg.solve(K, df)
+    else:
+      q, *_ = np.linalg.lstsq(K, df)
+    q = q.flatten()
+    Q = torch.zeros((dim, dim), requires_grad=False, device='cpu')
+    for i in range(dim):
+      for j in range(i, dim):
+        Q[i, j] = q[int(j * (j + 1) / 2) + i]
+    for i in range(dim):
+      for j in range(0, i):
+        Q[i, j] = Q[j, i]
+    del d_new
+    return Q
+  
+  @drsom_timer
+  def update_trust_region(self, p_copy, directions, fx=0.0, closure=None, style=DRSOM_MODE_HVP):
+    st = time.time()
+    __unused = p_copy
+    # each direction is a list of tensors
+    dim = len(directions)
+    # construct G (the inner products)
+    G = torch.zeros((dim, dim), requires_grad=False, device='cpu')
+    for i in range(dim):
+      for j in range(i, dim):
+        for p in self._params:
+          v = directions[i][p]
+          u = directions[j][p]
+          # compute G[i,j]
+          G[i, j] += torch.mul(u, v).sum().cpu().detach()
+    
+    # keep symmetry
+    for i in range(dim):
+      for j in range(i):
+        G[i, j] = G[j, i]
+    
+    # construct c
+    c = torch.zeros(dim, requires_grad=False, device='cpu')
+    for i in range(dim):
+      for p in self._params:
+        u = directions[i][p]
+        c[i] += torch.mul(p.grad, u).sum().cpu().detach()
+    
+    # compute Hv for v in directions;
+    #   assume directions[0] = g/|g|
+    if self.iter % self.freq == 0:
+      # if self.iter == 0:
+      #
+      if self.iter == 0:
+        with torch.enable_grad():
+          Q = self.compute_Q_via_hvp(directions, style)
+          self.zero_grad()
+        # Q = Q1
+      else:
+        Q = self.compute_Q_via_interpolation(
+          directions, p_copy=p_copy, closure=closure, fx=fx,
+          delta=max(0.1, min(self.alpha_norm.item(), 1))
+        )
+    
+    else:
+      # if set freq = 1
+      #   this never happens
+      # Q = torch.tensor([[G, 0.0], [0.0, dd]], requires_grad=False)
+      raise ValueError("not handled yet")
+    
+    self.ghg = (Q[0, 0] + self.ghg * self.iter) / (self.iter + 1)
+    
+    # compute Q/c/G
+    self.Q = Q
+    self.c = c
+    # use generalized a'Ga <= delta
+    self.G = G
     et = time.time()
   
-  def normalize(self, v):
-    v_norm = torch.linalg.norm(v)
+  @drsom_timer
+  def normalize(self, direction):
+    v_norm = torch.sqrt(sum(torch.linalg.norm(v) ** 2 for p, v in direction.items()))
     v_norm = 1 if v_norm == 0 else v_norm
-    return v / v_norm
+    return {p: v / v_norm for p, v in direction.items()}
   
-  def gather_normalized_grad(self):
-    
-    # todo, should we normalize?
-    return {p: p.grad.detach().clone() for p in self._params}
+  def gather_normalized_grad(self, alpha=1):
+    return self.normalize({p: alpha * p.grad.detach().clone() for p in self._params})
   
   def gather_normalize(self, k):
-    return {p: self.state[p][k] for p in self._params}
+    return self.normalize({p: self.state[p][k] for p in self._params})
   
   def step(self, closure=None):
     """
@@ -275,7 +357,7 @@ class DRSOMB(torch.optim.Optimizer):
     """
     
     if closure is None:
-      raise ValueError("must provide a closure for RSOM")
+      raise ValueError("must provide a closure for DRSOM")
     closure = torch.enable_grad()(closure)
     if DRSOM_VERBOSE:
       torch.autograd.set_detect_anomaly(True)
@@ -288,96 +370,99 @@ class DRSOMB(torch.optim.Optimizer):
     
     # @note
     # no need to scale (even for gradient) since it is a new tensor.
-    g_old = self.gather_normalized_grad()
+    g_old = self.gather_normalized_grad(alpha=-1)
     directions = [
       g_old,  # make sure -g is the first direction
       *(self.gather_normalize(k) for k in DRSOM_DIRECTIONS)
     ]
-    
-    self.update_trust_region(p_copy, directions, closure=closure, style=DRSOM_MODE_HVP)
+    # with profile(activities=[ProfilerActivity.CUDA],
+    #              profile_memory=True, record_shapes=True) as prof:
+    self.update_trust_region(p_copy, directions, fx=loss.cpu().detach(), closure=closure, style=DRSOM_MODE_HVP)
     # accept or not?
     acc_step = False
     # adjust lambda: (and thus trust region radius)
     iter_adj = 1
-    while iter_adj < self._max_iter_adj:
-      # solve alpha
-      trs_est = self.compute_step(option_tr=self.option_tr)
-      if trs_est < 0:
-        self.gamma = max(self.gamma * self.beta1, 1e-4)
-        if DRSOM_VERBOSE:
-          pprint(self.logline)
-        continue
-      alpha = self.alpha
-      
-      # build direction
-      dim = len(directions)
-      d_new = {p: torch.zeros_like(p, requires_grad=False) for p in self._params}
-      for p in self._params:
-        for i in range(dim):
-          u = directions[i][p]
-          d_new[p].add_(u, alpha=alpha[i])
-      
-      self._use_new_d(d_new)
-      loss_est = float(closure(backward=False))
-      # accept or not？
-      loss_dec = loss - loss_est
-      rho = loss_dec / trs_est
-      
-      # update the trust-region radius (implicitly by gamma/lambda)
-      lmb_dec = 0
-      gamma_old = self.gamma
-      if rho <= self.zeta1:
-        self.gamma = max(self.gamma * self.beta1, 1e-4)
-      else:
-        if rho >= self.zeta2:
-          lmb_dec = 1
-          self.gamma = max(self.gammalb, min(self.gamma / self.beta2, np.log(self.gamma)))
-      
-      acc_step = rho > self.eta
-      if DRSOM_VERBOSE:
-        self.logline['dQ'] = '{:+.2e}'.format(trs_est.item())
-        self.logline['df'] = '{:+.2e}'.format(loss_dec.item())
-        self.logline['rho'] = '{:+.2e}'.format(rho.item())
-        self.logline['acc'] = int(acc_step.item())
-        self.logline['acc-𝜆'] = lmb_dec
-        self.logline['𝛄'] = '{:+.2e}'.format(self.gamma)
-        self.logline['𝛄-'] = '{:+.2e}'.format(gamma_old)
-        self.logline['f'] = '{:+.2e}'.format(loss.item())
-        self.logline['k'] = '{:+6d}'.format(self.iter)
-        self.logline['k0'] = iter_adj
-        print(
-          pd.DataFrame(
-            data=[list(self.logline.values())], columns=self.logline.keys(), dtype=str
-          ).to_markdown(
-            tablefmt="grid"
-          )
-        )
-      if not acc_step:
-        # set back to old ~ trial step failed
-        self._set_param(p_copy)
-      
-      else:
-        if 'momentum_g' in DRSOM_DIRECTIONS:
-          # compute momentum_g
-          _loss = closure()
-          raise ValueError("not implemented")
-        elif 'momentum' in DRSOM_DIRECTIONS:
-          self._save_momentum(d_new, 'momentum')
+    with torch.no_grad():
+      while iter_adj < self._max_iter_adj:
+        # solve alpha
+        trs_est = self.compute_step(option_tr=self.option_tr)
+        if trs_est < 0:
+          self.gamma = max(self.gamma * self.beta1, 1e-4)
+          if DRSOM_VERBOSE:
+            pprint(self.logline)
+          continue
+        alpha = self.alpha
+        
+        # build direction
+        dim = len(directions)
+        d_new = {p: torch.zeros_like(p, requires_grad=False) for p in self._params}
+        for p in self._params:
+          for i in range(dim):
+            u = directions[i][p]
+            d_new[p].add_(u, alpha=alpha[i])
+        
+        self._use_new_d(d_new)
+        loss_est = closure(backward=False).detach().cpu()
+        # accept or not？
+        loss_dec = loss - loss_est
+        rho = loss_dec / trs_est
+        
+        # update the trust-region radius (implicitly by gamma/lambda)
+        lmb_dec = 0
+        gamma_old = self.gamma
+        if rho <= self.zeta1:
+          self.gamma = max(self.gamma * self.beta1, 1e-4)
         else:
-          # no momentum has to be kept
-          pass
-        break
+          if rho >= self.zeta2:
+            lmb_dec = 1
+            self.gamma = max(self.gammalb, min(self.gamma / self.beta2, np.log(self.gamma)))
+        
+        acc_step = rho > self.eta
+        if DRSOM_VERBOSE:
+          self.logline['dQ'] = '{:+.2e}'.format(trs_est.item())
+          self.logline['df'] = '{:+.2e}'.format(loss_dec.item())
+          self.logline['rho'] = '{:+.2e}'.format(rho.item())
+          self.logline['acc'] = int(acc_step.item())
+          self.logline['acc-𝜆'] = lmb_dec
+          self.logline['𝛄'] = '{:+.2e}'.format(self.gamma)
+          self.logline['𝛄-'] = '{:+.2e}'.format(gamma_old)
+          self.logline['f'] = '{:+.2e}'.format(loss.item())
+          self.logline['k'] = '{:+6d}'.format(self.iter)
+          self.logline['k0'] = iter_adj
+          print(
+            pd.DataFrame(
+              data=[list(self.logline.values())], columns=self.logline.keys(), dtype=str
+            ).to_markdown(
+              tablefmt="grid"
+            )
+          )
+        if not acc_step:
+          # set back to old ~ trial step failed
+          self._set_param(p_copy)
+        
+        else:
+          if 'momentum_g' in DRSOM_DIRECTIONS:
+            # compute momentum_g
+            _loss = closure()
+            raise ValueError("not implemented")
+          elif 'momentum' in DRSOM_DIRECTIONS:
+            self._save_momentum(d_new, 'momentum')
+          else:
+            # no momentum has to be kept
+            pass
+          break
+        
+        iter_adj += 1
       
-      iter_adj += 1
+      self.iter += 1
+      n_iter += 1
+      
+      if not acc_step:
+        # if this step is not acc. (after max # of iteration for adjustment)
+        # consider restart the optimizer by clearing the momentum,
+        #   just like a nonlinear conjugate gradient method.
+        self._clear_momentum()
+        self.gamma = self.gammalb
     
-    self.iter += 1
-    n_iter += 1
-    
-    if not acc_step:
-      # if this step is not acc. (after max # of iteration for adjustment)
-      # consider restart the optimizer by clearing the momentum,
-      #   just like a nonlinear conjugate gradient method.
-      self._clear_momentum()
-      self.gamma = self.gammalb
-    
+    # print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=10))
     return loss

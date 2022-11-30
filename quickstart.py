@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 
-from pydrsom.drsom import DRSOM
+from pydrsom.drsomb import DRSOMB as DRSOM
 from pydrsom.drsom_utils import *
 
 parser = argparse.ArgumentParser(
@@ -37,7 +37,7 @@ parser.add_argument("--optim",
                     default='drsom',
                     choices=[
                       'adam', 'sgd4',
-                      'drsom', 'drsomnd', 'drsomq'
+                      'drsom',
                     ])
 parser.add_argument("--model",
                     required=False,
@@ -316,24 +316,6 @@ if __name__ == '__main__':
     'lbfgs':
       dict(line_search_fn='strong_wolfe', max_iter=itermax),
     'drsom':
-      dict(
-        max_iter=itermax,
-        thetas=(0.99, 0.999),
-        option_tr=args.option_tr,
-        hessian_window=hessian_window,
-        beta1=args.drsom_beta1,
-        beta2=args.drsom_beta2,
-      ),
-    'drsomnd':
-      dict(
-        max_iter=itermax,
-        thetas=(0.99, 0.999),
-        option_tr=args.option_tr,
-        hessian_window=hessian_window,
-        beta1=args.drsom_beta1,
-        beta2=args.drsom_beta2,
-      ),
-    'drsomq':
       dict(
         max_iter=itermax,
         thetas=(0.99, 0.999),

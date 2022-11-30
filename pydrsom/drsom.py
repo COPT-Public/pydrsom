@@ -1,5 +1,5 @@
 """
-radius free (dimension-reduced trust-region method) DRSOM
+the original dimension-reduced second-order method (DRSOM) in radius free mode
 @author: Chuwen Zhang<chuwzhang@gmail.com>, Yinyu Ye<yinyu-ye@stanford.edu>
 @note:
   This is a vanilla implementation of (Mini-batch, Radius-Free) DRSOM.
