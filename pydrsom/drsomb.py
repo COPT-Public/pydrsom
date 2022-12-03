@@ -24,12 +24,13 @@ class DRSOMB(torch.optim.Optimizer):
       self,
       params,
       max_iter=15,
-      option_tr='a',
+      option_tr="a",
       gamma=1e-6,
       beta1=5e1,
       beta2=3e1,
       hessian_window=1,
-      thetas=(0.99, 0.999), eps=1e-8
+      thetas=(0.99, 0.999),
+      eps=1e-8,
   ):
     """
     The DRSOM:
@@ -74,9 +75,15 @@ class DRSOMB(torch.optim.Optimizer):
     ##########################
     # global averages & keepers
     ##########################
-    self.Q: Optional[torch.Tensor] = torch.zeros((2, 2), requires_grad=False, device='cpu')
-    self.c: Optional[torch.Tensor] = torch.zeros(2, requires_grad=False, device='cpu')
-    self.G: Optional[torch.Tensor] = torch.zeros((2, 2), requires_grad=False, device='cpu')
+    self.Q: Optional[torch.Tensor] = torch.zeros(
+      (2, 2), requires_grad=False, device="cpu"
+    )
+    self.c: Optional[torch.Tensor] = torch.zeros(
+      2, requires_grad=False, device="cpu"
+    )
+    self.G: Optional[torch.Tensor] = torch.zeros(
+      (2, 2), requires_grad=False, device="cpu"
+    )
     
     ##########################
     # scalar attrs
@@ -97,25 +104,27 @@ class DRSOMB(torch.optim.Optimizer):
     # step acc rules
     ##########################
     self.eta = 0.08
-    self.zeta1 = 0.25
-    self.zeta2 = 0.75
+    self.zeta1 = 0.15
+    self.zeta2 = 0.7
     ##########################
     # weight decay of the past
     ##########################
     # other indicators
     self.ghg = 0.0
     # structured log line
-    self.logline = None
+    self.logline = {}
     #########################
   
   def get_name(self):
-    return f"drsom-b:d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}"
+    return f"drsom-b:qp@{DRSOM_MODE_QP}d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}"
   
   def get_params(self):
     """
     gets all parameters in all param_groups with gradients requirements
     """
-    return [p for group in self.param_groups for p in group['params'] if p.requires_grad]
+    return [
+      p for group in self.param_groups for p in group["params"] if p.requires_grad
+    ]
   
   def _clone_param(self):
     return [p.clone(memory_format=torch.contiguous_format) for p in self._params]
@@ -156,7 +165,7 @@ class DRSOMB(torch.optim.Optimizer):
     return TRS._solve_alpha(self, Q, c, tr)
   
   @drsom_timer
-  def compute_step(self, option_tr='p'):
+  def compute_step(self, option_tr="p"):
     
     self.alpha, self.alpha_norm = self.solve_alpha(
       self.Q, self.c, tr=self.G
@@ -191,7 +200,7 @@ class DRSOMB(torch.optim.Optimizer):
   @drsom_timer
   def compute_Q_via_hvp(self, directions, style):
     dim = len(directions)
-    Q = torch.zeros((dim, dim), requires_grad=False, device='cpu')
+    Q = torch.zeros((dim, dim), requires_grad=False, device="cpu")
     if self.Hv is None:
       self.Hv = [[] for _ in range(dim)]
     for i in range(dim):
@@ -229,23 +238,49 @@ class DRSOMB(torch.optim.Optimizer):
     return a
   
   @drsom_timer
-  def compute_Q_via_interpolation(self, directions, p_copy=None, fx=0.0, closure=None, delta=1e-2):
+  def compute_Q_via_interpolation(self, directions, fx, c: Optional[torch.Tensor], p_copy=None, closure=None,
+                                  delta=1e-2, multiples=1):
     dim = len(directions)
+    
+    def coordinates(dim, k, scaler=1.0):
+      """
+      return e_k
+      Args:
+        dim:
+        k:
+      """
+      arr = np.zeros(dim)
+      arr[k] = scaler
+      return arr
+    
+    def sampling():
+      # trial step in the ellipsoid
+      a2 = [coordinates(dim, j, np.exp(-s) * delta) for j in range(dim) for s in range(k_diag)]
+      # a = [np.random.uniform(0, 1, size=dim) * delta for _ in range(k_offdiag)]
+      a = []
+      a = [*a2, *a]
+      return a
+    
+    ###########################################################
     # compare with HVP
-    _ = closure(backward=True)
-    Q1 = self.compute_Q_via_hvp(directions, style=0)
-    q1 = Q1.triu().cpu().detach().numpy()
-    q1 = q1[q1.nonzero()]
-    # we compute 3 directions so that
+    # _ = closure(backward=True)
+    # Q1 = self.compute_Q_via_hvp(directions, style=0)
+    # q1 = Q1.triu().cpu().detach().numpy()
+    # q1 = q1[q1.nonzero()]
+    ###########################################################
+    # we compute k > dim*(dim+1)/2 directions so that
     #   Q can be determined by solving a linear system;
     #   to this end we have to compute r*(r+1)/2 forward pass.
     # we determine the step-sizes by using the last step length
     #   and randomly select on the sphere.
-    k = int(dim * (dim + 1))
-    # trial step on the sphere
-    a = [np.random.normal(0, 1, size=dim) for _ in range(k)]
-    a = [np.abs(v) / np.linalg.norm(v) * delta for v in a]
+    k_offdiag = int(dim * (dim - 1) / 2 * multiples)
+    k_diag = int(multiples * 2)
+    c_arr = c.numpy()
+    a = sampling()
     
+    # evaluation
+    ff = [np.dot(v, c_arr) for v in a]
+    k = len(a)
     df = np.zeros((k, 1))
     K = np.array([self.build_natural_basis(v) for v in a])
     d_new = {p: torch.zeros_like(p, requires_grad=False) for p in self._params}
@@ -258,7 +293,7 @@ class DRSOMB(torch.optim.Optimizer):
       
       self._use_new_d(d_new)
       loss_est = closure(backward=False).detach().cpu()
-      df[j] = loss_est - fx
+      df[j] = loss_est - fx - ff[j]
       # set back
       self._set_param(p_copy)
     
@@ -268,7 +303,7 @@ class DRSOMB(torch.optim.Optimizer):
     else:
       q, *_ = np.linalg.lstsq(K, df)
     q = q.flatten()
-    Q = torch.zeros((dim, dim), requires_grad=False, device='cpu')
+    Q = torch.zeros((dim, dim), requires_grad=False, device="cpu")
     for i in range(dim):
       for j in range(i, dim):
         Q[i, j] = q[int(j * (j + 1) / 2) + i]
@@ -276,6 +311,9 @@ class DRSOMB(torch.optim.Optimizer):
       for j in range(0, i):
         Q[i, j] = Q[j, i]
     del d_new
+    
+    if DRSOM_VERBOSE:
+      self.logline["δ"] = "{:+.2e}".format(delta)
     return Q
   
   @drsom_timer
@@ -285,7 +323,7 @@ class DRSOMB(torch.optim.Optimizer):
     # each direction is a list of tensors
     dim = len(directions)
     # construct G (the inner products)
-    G = torch.zeros((dim, dim), requires_grad=False, device='cpu')
+    G = torch.zeros((dim, dim), requires_grad=False, device="cpu")
     for i in range(dim):
       for j in range(i, dim):
         for p in self._params:
@@ -300,7 +338,7 @@ class DRSOMB(torch.optim.Optimizer):
         G[i, j] = G[j, i]
     
     # construct c
-    c = torch.zeros(dim, requires_grad=False, device='cpu')
+    c = torch.zeros(dim, requires_grad=False, device="cpu")
     for i in range(dim):
       for p in self._params:
         u = directions[i][p]
@@ -309,19 +347,21 @@ class DRSOMB(torch.optim.Optimizer):
     # compute Hv for v in directions;
     #   assume directions[0] = g/|g|
     if self.iter % self.freq == 0:
-      # if self.iter == 0:
-      #
-      if self.iter == 0:
+      if DRSOM_MODE_QP == 0:
         with torch.enable_grad():
           Q = self.compute_Q_via_hvp(directions, style)
           self.zero_grad()
-        # Q = Q1
-      else:
+      elif DRSOM_MODE_QP == 1:
         Q = self.compute_Q_via_interpolation(
-          directions, p_copy=p_copy, closure=closure, fx=fx,
-          delta=max(0.1, min(self.alpha_norm.item(), 1))
+          directions,
+          p_copy=p_copy,
+          closure=closure,
+          fx=fx,
+          c=c,
+          delta=max(1e-3, min(self.alpha_norm, 1e1)),
         )
-    
+      else:
+        raise ValueError("not handled yet")
     else:
       # if set freq = 1
       #   this never happens
@@ -343,11 +383,17 @@ class DRSOMB(torch.optim.Optimizer):
     v_norm = 1 if v_norm == 0 else v_norm
     return {p: v / v_norm for p, v in direction.items()}
   
-  def gather_normalized_grad(self, alpha=1):
-    return self.normalize({p: alpha * p.grad.detach().clone() for p in self._params})
+  def gather_normalized_grad(self, bool_normalized=False, alpha=1):
+    if bool_normalized:
+      return self.normalize(
+        {p: alpha * p.grad.detach().clone() for p in self._params}
+      )
+    return {p: alpha * p.grad.detach().clone() for p in self._params}
   
-  def gather_normalize(self, k):
-    return self.normalize({p: self.state[p][k] for p in self._params})
+  def gather_normalize(self, k, bool_normalized=False):
+    if bool_normalized:
+      return self.normalize({p: self.state[p][k] for p in self._params})
+    return {p: self.state[p][k] for p in self._params}
   
   def step(self, closure=None):
     """
@@ -373,11 +419,17 @@ class DRSOMB(torch.optim.Optimizer):
     g_old = self.gather_normalized_grad(alpha=-1)
     directions = [
       g_old,  # make sure -g is the first direction
-      *(self.gather_normalize(k) for k in DRSOM_DIRECTIONS)
+      *(self.gather_normalize(k) for k in DRSOM_DIRECTIONS),
     ]
     # with profile(activities=[ProfilerActivity.CUDA],
     #              profile_memory=True, record_shapes=True) as prof:
-    self.update_trust_region(p_copy, directions, fx=loss.cpu().detach(), closure=closure, style=DRSOM_MODE_HVP)
+    self.update_trust_region(
+      p_copy,
+      directions,
+      fx=loss.cpu().detach(),
+      closure=closure,
+      style=DRSOM_MODE_HVP,
+    )
     # accept or not?
     acc_step = False
     # adjust lambda: (and thus trust region radius)
@@ -412,26 +464,36 @@ class DRSOMB(torch.optim.Optimizer):
         gamma_old = self.gamma
         if rho <= self.zeta1:
           self.gamma = max(self.gamma * self.beta1, 1e-4)
+        elif self.zeta1 < rho < self.zeta2:
+          self.gamma = self.gamma = max(
+            self.gammalb,
+            self.gamma / self.beta2
+          )
         else:
           if rho >= self.zeta2:
             lmb_dec = 1
-            self.gamma = max(self.gammalb, min(self.gamma / self.beta2, np.log(self.gamma)))
+            self.gamma = max(
+              self.gammalb,
+              min(self.gamma / self.beta2, np.log(self.gamma)),
+            )
         
         acc_step = rho > self.eta
         if DRSOM_VERBOSE:
-          self.logline['dQ'] = '{:+.2e}'.format(trs_est.item())
-          self.logline['df'] = '{:+.2e}'.format(loss_dec.item())
-          self.logline['rho'] = '{:+.2e}'.format(rho.item())
-          self.logline['acc'] = int(acc_step.item())
-          self.logline['acc-𝜆'] = lmb_dec
-          self.logline['𝛄'] = '{:+.2e}'.format(self.gamma)
-          self.logline['𝛄-'] = '{:+.2e}'.format(gamma_old)
-          self.logline['f'] = '{:+.2e}'.format(loss.item())
-          self.logline['k'] = '{:+6d}'.format(self.iter)
-          self.logline['k0'] = iter_adj
+          self.logline["dQ"] = "{:+.2e}".format(trs_est.item())
+          self.logline["df"] = "{:+.2e}".format(loss_dec.item())
+          self.logline["rho"] = "{:+.2e}".format(rho.item())
+          self.logline["acc"] = int(acc_step.item())
+          self.logline["acc-𝜆"] = lmb_dec
+          self.logline["𝛄"] = "{:+.2e}".format(self.gamma)
+          self.logline["𝛄-"] = "{:+.2e}".format(gamma_old)
+          self.logline["f"] = "{:+.2e}".format(loss.item())
+          self.logline["k"] = "{:+6d}".format(self.iter)
+          self.logline["k0"] = iter_adj
           print(
             pd.DataFrame(
-              data=[list(self.logline.values())], columns=self.logline.keys(), dtype=str
+              data=[list(self.logline.values())],
+              columns=self.logline.keys(),
+              dtype=str,
             ).to_markdown(
               tablefmt="grid"
             )
@@ -441,12 +503,12 @@ class DRSOMB(torch.optim.Optimizer):
           self._set_param(p_copy)
         
         else:
-          if 'momentum_g' in DRSOM_DIRECTIONS:
+          if "momentum_g" in DRSOM_DIRECTIONS:
             # compute momentum_g
             _loss = closure()
             raise ValueError("not implemented")
-          elif 'momentum' in DRSOM_DIRECTIONS:
-            self._save_momentum(d_new, 'momentum')
+          elif "momentum" in DRSOM_DIRECTIONS:
+            self._save_momentum(d_new, "momentum")
           else:
             # no momentum has to be kept
             pass

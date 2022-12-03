@@ -9,6 +9,7 @@ import numpy as np
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 DRSOM_VERBOSE = int(os.environ.get('DRSOM_VERBOSE', 0))
 DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 0))
+DRSOM_MODE_QP = int(os.environ.get('DRSOM_MODE_QP', 0))
 DRSOM_MODE_HVP = int(os.environ.get('DRSOM_MODE_HVP', 0))
 if DRSOM_MODE == 0:
   DRSOM_DIRECTIONS = ['momentum']
@@ -60,17 +61,19 @@ def drsom_timer(func):
 class TRS:
   @staticmethod
   def _norm(alpha, tr):
-    return (tr @ alpha).dot(alpha).sqrt()
+    return (tr @ alpha).dot(alpha).sqrt().item()
   
   @staticmethod
   def _compute_root(Q, c, gamma, tr=torch.eye(2)):
     lsolve = torch.linalg.solve
+    if len(c) == 1:
+      lmin = max(0, (-Q[0, 0] / tr).item())
+    else:
+      lmin, _ = torch.lobpcg(Q, B=tr, largest=False)
+      lmin = lmin.item()
     
-    D, V = torch.linalg.eigh(Q)
-    
-    lmin, lmax = min(D), max(D)
-    lb = max(0, -lmin.item())
-    lmax = lmax.item() if lmax > lb else lb + 1e4
+    lb = max(0, -lmin)
+    lmax = lb + 1e4
     _lmb_this = gamma * lmax + max(1 - gamma, 0) * lb
     it = 0
     try:
@@ -104,6 +107,7 @@ class TRS:
     
     if DRSOM_VERBOSE:
       optimizer.logline = {
+        **optimizer.logline,
         '𝜆': '{:+.2e}'.format(lmd),
         'Q/c/G': np.round(np.vstack([optimizer.Q, optimizer.c, optimizer.G]), 3),
         'a': np.array(alpha.tolist()).reshape((dim, 1)),

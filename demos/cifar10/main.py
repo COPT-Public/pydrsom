@@ -44,6 +44,7 @@ def get_parser():
              'drsom', 'drsomk']
   )
   parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
+  parser.add_argument('--batch', default=128, type=int, help='batch size')
   # for adabound
   parser.add_argument('--final_lr', default=0.1, type=float,
                       help='final learning rate of AdaBound')
@@ -81,7 +82,7 @@ def get_parser():
   return parser
 
 
-def build_dataset():
+def build_dataset(args):
   print('==> Preparing data..')
   transform_train = transforms.Compose([
     transforms.RandomCrop(32, padding=4),
@@ -97,12 +98,12 @@ def build_dataset():
   
   trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True,
                                           transform=transform_train)
-  train_loader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True,
+  train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch, shuffle=True,
                                              num_workers=2)
   
   testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True,
                                          transform=transform_test)
-  test_loader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
+  test_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch, shuffle=False, num_workers=2)
   
   # classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
   
@@ -181,7 +182,7 @@ def main():
   parser = get_parser()
   args = parser.parse_args()
   print(json.dumps(args.__dict__, indent=2))
-  train_loader, test_loader = build_dataset()
+  train_loader, test_loader = build_dataset(args)
   device = 'cuda' if torch.cuda.is_available() else 'cpu'
   
   if args.resume:
@@ -228,6 +229,7 @@ def main():
       
       else:
         scheduler.step()
+        print(f"lr scheduler steps: {scheduler.get_lr()}")
       
       train_acc, train_loss, = train(net, epoch, device, train_loader, args.optim, optimizer, criterion)
       test_acc, test_loss = test(net, device, test_loader, criterion)
@@ -237,7 +239,7 @@ def main():
       writer.add_scalar("Loss/train", train_loss, epoch)
       writer.add_scalar("Acc/test", test_acc, epoch)
       writer.add_scalar("Loss/test", test_loss, epoch)
-      
+
       # Save checkpoint.
       if epoch % 5 == 0:
         print('Saving..')
