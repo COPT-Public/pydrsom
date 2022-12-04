@@ -30,6 +30,9 @@ class DRSOMB(torch.optim.Optimizer):
       beta2=3e1,
       hessian_window=1,
       thetas=(0.99, 0.999),
+      decay_window=15,
+      decay_step=5e2,
+      decay_radius_step=2e-1,
       eps=1e-8,
   ):
     """
@@ -92,20 +95,29 @@ class DRSOMB(torch.optim.Optimizer):
     self.iter = 0
     self.alpha: Optional[torch.TensorType] = None
     self.alpha_norm = 0.1
+    self.alpha_max = 1e4
+    ##########################
+    # TRS/Regularization params
+    ##########################
     # gamma & lower bound on gamma
     self.gamma = gamma
     self.gammalb = 1e-12
+    # maximum step size
+    self.radius = 1e1
+    self.radiusub = 1e1
+    # decay rules
+    self.decay_window = decay_window
+    self.decay_step = decay_step
+    self.decay_radius_step = decay_radius_step
     # gamma increasing rules
     self.beta1 = beta1
     self.beta2 = beta2
-    # maximum step size
-    self.delta_max = 1e1
     ##########################
     # step acc rules
     ##########################
     self.eta = 0.08
-    self.zeta1 = 0.15
-    self.zeta2 = 0.7
+    self.zeta1 = 0.25
+    self.zeta2 = 0.75
     ##########################
     # weight decay of the past
     ##########################
@@ -165,17 +177,19 @@ class DRSOMB(torch.optim.Optimizer):
     return TRS._solve_alpha(self, Q, c, tr)
   
   @drsom_timer
-  def compute_step(self, option_tr="p"):
-    
+  def compute_step(self, option_tr='p'):
+    dim = len(self.c)
     self.alpha, self.alpha_norm = self.solve_alpha(
-      self.Q, self.c, tr=self.G
+      self.Q, self.c, tr=self.G if option_tr == 'p' else torch.eye(dim)
     )
     
     ####################################
     # compute estimate decrease
     ####################################
     trs_est = - 1 / 2 * (self.Q @ self.alpha).dot(self.alpha) - self.c.dot(self.alpha)
-    
+    if DRSOM_VERBOSE:
+      self.logline["Δ"] = "{:+.2e}".format(self.radius)
+      self.logline["δ"] = "{:+.2e}".format(self.alpha_norm)
     return trs_est
   
   @drsom_timer
@@ -206,8 +220,16 @@ class DRSOMB(torch.optim.Optimizer):
     for i in range(dim):
       if style == 0:
         self.Hv[i] = self.hv(directions[i])
-      # elif style == 1:
-      #   self.hv_diff(p, g, v, closure, index=i)
+      elif style == 1:
+        raise ValueError(
+          "the finite diff option is unused,"
+          " try DRSOM_MODE_HVP=0"
+        )
+      else:
+        raise ValueError(
+          "not implemented,"
+          " try DRSOM_MODE_HVP=0"
+        )
     for i in range(dim):
       for j in range(i, dim):
         for idx, p in enumerate(self._params):
@@ -238,8 +260,9 @@ class DRSOMB(torch.optim.Optimizer):
     return a
   
   @drsom_timer
-  def compute_Q_via_interpolation(self, directions, fx, c: Optional[torch.Tensor], p_copy=None, closure=None,
-                                  delta=1e-2, multiples=1):
+  def compute_Q_via_interpolation(
+      self, directions, fx, c: Optional[torch.Tensor], p_copy=None, closure=None,
+      delta=1e-2, multiples=1):
     dim = len(directions)
     
     def coordinates(dim, k, scaler=1.0):
@@ -312,13 +335,11 @@ class DRSOMB(torch.optim.Optimizer):
         Q[i, j] = Q[j, i]
     del d_new
     
-    if DRSOM_VERBOSE:
-      self.logline["δ"] = "{:+.2e}".format(delta)
     return Q
   
   @drsom_timer
   def update_trust_region(self, p_copy, directions, fx=0.0, closure=None, style=DRSOM_MODE_HVP):
-    st = time.time()
+    
     __unused = p_copy
     # each direction is a list of tensors
     dim = len(directions)
@@ -375,7 +396,6 @@ class DRSOMB(torch.optim.Optimizer):
     self.c = c
     # use generalized a'Ga <= delta
     self.G = G
-    et = time.time()
   
   @drsom_timer
   def normalize(self, direction):
@@ -408,6 +428,12 @@ class DRSOMB(torch.optim.Optimizer):
     if DRSOM_VERBOSE:
       torch.autograd.set_detect_anomaly(True)
     n_iter = 0
+    if (self.iter + 1 % self.decay_window) == 0:
+      self.gammalb *= self.decay_step
+      self.radiusub *= self.decay_radius_step
+      print(f"current regularization terms: {self.gammalb} and {self.radiusub}")
+    if self.iter == 0:
+      print(f"current regularization terms: {self.gammalb} and {self.radiusub}")
     
     loss = closure()
     
@@ -421,8 +447,6 @@ class DRSOMB(torch.optim.Optimizer):
       g_old,  # make sure -g is the first direction
       *(self.gather_normalize(k) for k in DRSOM_DIRECTIONS),
     ]
-    # with profile(activities=[ProfilerActivity.CUDA],
-    #              profile_memory=True, record_shapes=True) as prof:
     self.update_trust_region(
       p_copy,
       directions,
@@ -440,6 +464,7 @@ class DRSOMB(torch.optim.Optimizer):
         trs_est = self.compute_step(option_tr=self.option_tr)
         if trs_est < 0:
           self.gamma = max(self.gamma * self.beta1, 1e-4)
+          self.radius = max(self.radius / np.sqrt(self.beta1), 1e-12)
           if DRSOM_VERBOSE:
             pprint(self.logline)
           continue
@@ -463,18 +488,28 @@ class DRSOMB(torch.optim.Optimizer):
         lmb_dec = 0
         gamma_old = self.gamma
         if rho <= self.zeta1:
+          # be more conservative
           self.gamma = max(self.gamma * self.beta1, 1e-4)
-        elif self.zeta1 < rho < self.zeta2:
-          self.gamma = self.gamma = max(
-            self.gammalb,
-            self.gamma / self.beta2
-          )
+          self.radius = max(self.radius * self.decay_radius_step, 1e-8)
+        # @note:
+        # do we need "not very successful" adjustments?
+        # elif self.zeta1 < rho < self.zeta2:
+        #   self.gamma = self.gamma = max(
+        #     self.gammalb,
+        #     self.gamma / self.beta2
+        #   )
         else:
           if rho >= self.zeta2:
+            # be more aggressive
             lmb_dec = 1
             self.gamma = max(
               self.gammalb,
               min(self.gamma / self.beta2, np.log(self.gamma)),
+            )
+            # cannot exceed radius max
+            self.radius = min(
+              self.radius / self.decay_radius_step,
+              self.radiusub
             )
         
         acc_step = rho > self.eta
@@ -526,5 +561,4 @@ class DRSOMB(torch.optim.Optimizer):
         self._clear_momentum()
         self.gamma = self.gammalb
     
-    # print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=10))
     return loss

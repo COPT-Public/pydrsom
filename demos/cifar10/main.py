@@ -70,15 +70,24 @@ def get_parser():
   parser.add_argument('--drsom_beta2', default=30, type=float, help='DRSOM coefficients beta_2')
   parser.add_argument('--gamma_power', default=1e3, type=float,
                       help='gamma multiplier: (hyper) DRSOM coefficients for adjusting gamma lower bound')
+  parser.add_argument('--radius_power', default=1e1, type=float,
+                      help='radius multiplier: (hyper) DRSOM coefficients for adjusting radius upper bound')
   parser.add_argument('--tflogger', default="/tmp/", type=str, help='tf logger directory')
   
   # learning rate scheduler
   parser.add_argument(
-    '--lrstep', default=10, type=int,
+    '--lrstep', default=15, type=int,
     help='step for learning rate scheduler\n'
          ' - for Adam/SGD, it corresponds to usual step definition for the lr scheduler\n'
          ' - for DRSOM, it says, in every `lrstep` step, we increase the lower bound on gamma via `gamma *= gamma_power` (such that the stepsize is decreased)'
   )
+  parser.add_argument(
+    '--lrcoeff', default=0.5, type=float,
+    help='step for learning rate scheduler\n'
+         ' - for Adam/SGD, it corresponds to usual step definition for the lr scheduler\n'
+         ' - for DRSOM, it says, in every `lrstep` step, we increase the lower bound on gamma via `gamma *= gamma_power` (such that the stepsize is decreased)'
+  )
+  
   return parser
 
 
@@ -113,7 +122,7 @@ def build_dataset(args):
 def build_model(args, device, ckpt=None):
   print('==> Building model..')
   net = {
-    'resnet': ResNet34,
+    'resnet34': ResNet34,
     'resnet18': ResNet18
   }[args.model]()
   print(f'==> Building model {args.model}')
@@ -128,21 +137,25 @@ def build_model(args, device, ckpt=None):
   return net
 
 
-def create_optimizer(args, model):
+def create_optimizer(args, model, start_epoch=0):
   model_params = model.parameters()
   if args.optim == 'sgd':
-    return optim.SGD(model_params, args.lr, momentum=args.momentum,
+    return optim.SGD(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep), momentum=args.momentum,
                      weight_decay=args.weight_decay)
   elif args.optim == 'adagrad':
-    return optim.Adagrad(model_params, args.lr, weight_decay=args.weight_decay)
+    return optim.Adagrad(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
+                         weight_decay=args.weight_decay)
   elif args.optim == 'adam':
-    return optim.Adam(model_params, args.lr, betas=(args.beta1, args.beta2),
+    return optim.Adam(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
+                      betas=(args.beta1, args.beta2),
                       weight_decay=args.weight_decay)
   elif args.optim == 'amsgrad':
-    return optim.Adam(model_params, args.lr, betas=(args.beta1, args.beta2),
+    return optim.Adam(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
+                      betas=(args.beta1, args.beta2),
                       weight_decay=args.weight_decay, amsgrad=True)
   elif args.optim == 'adabound':
-    return AdaBound(model_params, args.lr, betas=(args.beta1, args.beta2),
+    return AdaBound(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
+                    betas=(args.beta1, args.beta2),
                     final_lr=args.final_lr, gamma=args.gamma,
                     weight_decay=args.weight_decay)
   # second-order method
@@ -194,7 +207,7 @@ def main():
   
   net = build_model(args, device, ckpt=ckpt)
   criterion = nn.CrossEntropyLoss()
-  optimizer = create_optimizer(args, net)
+  optimizer = create_optimizer(args, net, start_epoch=start_epoch)
   
   if args.optim.startswith("drsom"):
     # get a scheduler
@@ -202,8 +215,7 @@ def main():
   else:
     # get a scheduler
     scheduler = optim.lr_scheduler.StepLR(
-      optimizer, step_size=args.lrstep, gamma=0.5,
-      last_epoch=start_epoch - 1
+      optimizer, step_size=args.lrstep, gamma=args.lrcoeff,
     )
   
   if args.optim.startswith("drsom"):
@@ -219,13 +231,17 @@ def main():
   
   writer = SummaryWriter(log_dir=os.path.join(args.tflogger, log_name))
   gammabase = optimizer.gammalb if args.optim.startswith("drsom") else 0
-  start_time = time.time()
+  radiusbase = optimizer.radiusub if args.optim.startswith("drsom") else 0
+  
   for epoch in range(start_epoch, start_epoch + args.epoch):
     try:
       if args.optim.startswith("drsom"):
-        print(f"lambda increased factor {args.gamma_power}")
-        optimizer.gammalb = gammabase * args.gamma_power ** ((epoch + 1) // args.lrstep)
-        print(f"gamma lower bound changed to {optimizer.gammalb}")
+        pass
+        # print(f"lambda increased factor {args.gamma_power}")
+        # optimizer.gammalb = gammabase * args.gamma_power ** ((epoch + 1) // args.lrstep)
+        # optimizer.radiusub = radiusbase / args.radius_power ** ((epoch + 1) // args.lrstep)
+        # print(f"gamma lower bound changed to {optimizer.gammalb}")
+        # print(f"radii upper bound changed to {optimizer.radiusub}")
       
       else:
         scheduler.step()
@@ -239,7 +255,7 @@ def main():
       writer.add_scalar("Loss/train", train_loss, epoch)
       writer.add_scalar("Acc/test", test_acc, epoch)
       writer.add_scalar("Loss/test", test_loss, epoch)
-
+      
       # Save checkpoint.
       if epoch % 5 == 0:
         print('Saving..')
@@ -262,8 +278,8 @@ def main():
         # torch.save({'train_acc': train_accuracies, 'test_acc': test_accuracies},
         #            os.path.join('curve', ckpt_name))
         #######################################
-        
-        
+    
+    
     except KeyboardInterrupt:
       print(f"Exiting at {epoch}")
       break

@@ -11,6 +11,7 @@ DRSOM_VERBOSE = int(os.environ.get('DRSOM_VERBOSE', 0))
 DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 0))
 DRSOM_MODE_QP = int(os.environ.get('DRSOM_MODE_QP', 0))
 DRSOM_MODE_HVP = int(os.environ.get('DRSOM_MODE_HVP', 0))
+DRSOM_MODE_TRS = int(os.environ.get('DRSOM_MODE_TRS', 0))
 if DRSOM_MODE == 0:
   DRSOM_DIRECTIONS = ['momentum']
 elif DRSOM_MODE == 1:
@@ -59,51 +60,90 @@ def drsom_timer(func):
 # TRS/Regularized QP solver
 ##########################################
 class TRS:
-  @staticmethod
-  def _norm(alpha, tr):
-    return (tr @ alpha).dot(alpha).sqrt().item()
+  lsolve = torch.linalg.solve
   
   @staticmethod
-  def _compute_root(Q, c, gamma, tr=torch.eye(2)):
-    lsolve = torch.linalg.solve
-    if len(c) == 1:
-      lmin = max(0, (-Q[0, 0] / tr).item())
-    else:
-      lmin, _ = torch.lobpcg(Q, B=tr, largest=False)
-      lmin = lmin.item()
+  def _norm(alpha, G):
+    return (G @ alpha).dot(alpha).sqrt().item()
+  
+  @staticmethod
+  def _compute_root(Q, c, gamma, G):
+    """
+    This is the radius free mode.
+      scale Lagrangian dual by gamma
+    Args:
+      gamma: is the scale param
+      G:
+
+    Returns:
+
+    """
     
-    lb = max(0, -lmin)
+    if len(c) == 1 or G[1, 1] == 0:
+      lmin = max(0, (-Q[0, 0] / G[0, 0]).item())
+    else:
+      lmin = torch.linalg.eigvalsh(Q)
+      lmin = lmin[0]
+    lb = max(0, lmin)
     lmax = lb + 1e4
     _lmb_this = gamma * lmax + max(1 - gamma, 0) * lb
     it = 0
     try:
-      alpha = lsolve(Q + tr * _lmb_this, -c)
+      alpha = TRS.lsolve(Q + G * _lmb_this, -c)
     except torch.linalg.LinAlgError as e:
       print(e)
-      print(Q, tr, _lmb_this, -c)
-      # todo, can we do better
-      alpha = lsolve(Q + tr * (_lmb_this + 1e-4), -c)
+      print(Q, G, _lmb_this, -c)
+      alpha = TRS.lsolve(Q + G * (_lmb_this + 1e-4), -c)
     
-    norm = TRS._norm(alpha, tr)
+    norm = TRS._norm(alpha, G)
     
     return it, _lmb_this, alpha, norm, True
   
   @staticmethod
-  def _solve_alpha(optimizer, Q, c, tr):
+  def _compute_root_tr(Q, c, delta, G=torch.eye(2)):
+    eps = 1e-2
+    
+    if len(c) == 1 or G[1, 1] == 0:
+      lmin = max(0, (-Q[0, 0] / G[0, 0]).item())
+    else:
+      lmin = torch.linalg.eigvalsh(Q)
+      lmin = lmin[0]
+    lb = max(0, lmin)
+    ub = lb + 1e1
+    it = 0
+    gamma = 1e-1
+    while True:
+      _lmb_this = lb * (1 - gamma) + gamma * ub
+      try:
+        alpha = TRS.lsolve(Q + G * _lmb_this, -c)
+      except:
+        print(Q, G, c)
+      norm = TRS._norm(alpha, G)
+      if norm < delta or it > 10:
+        break
+      gamma *= 5
+      it += 1
+    return it, _lmb_this, alpha, norm, True
+  
+  @staticmethod
+  def _solve_alpha(optimizer, Q, c, G):
     dim = c.size()[0]
-    if optimizer.iter == 0:  # or optimizer.Q[dim - 1, dim - 1] < 1e-4:
+    if optimizer.iter == 0 or optimizer.G[dim - 1, dim - 1] < 1e-4:
       lmd = 0.0
       alpha = torch.zeros_like(c)
       if Q[0, 0] > 0:
         alpha[0] = - c[0] / Q[0, 0] / (1 + optimizer.gamma)
       else:
         alpha[0] = - 1e-4 / (1 + optimizer.gamma)
-      norm = TRS._norm(alpha, tr)
-      if norm > optimizer.delta_max:
-        alpha = alpha / alpha.norm() * optimizer.delta_max
+      norm = TRS._norm(alpha, G)
+      if norm > optimizer.radius:
+        alpha = alpha / alpha.norm() * optimizer.radius
     else:
       # apply root-finding
-      it, lmd, alpha, norm, active = TRS._compute_root(Q, c, optimizer.gamma, tr)
+      if DRSOM_MODE_TRS:
+        it, lmd, alpha, norm, active = TRS._compute_root_tr(Q, c, optimizer.radius, G)
+      else:
+        it, lmd, alpha, norm, active = TRS._compute_root(Q, c, optimizer.gamma, G)
     
     if DRSOM_VERBOSE:
       optimizer.logline = {

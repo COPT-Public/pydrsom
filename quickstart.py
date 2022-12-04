@@ -368,10 +368,6 @@ if __name__ == '__main__':
       print(f"epoch {t}")
       _, avg_loss, acc = train(train_dataloader, name, model, loss_fn,
                                optimizer, ninterval)
-      if name.startswith('drsom') and (t + 1) % 5 == 0:
-        optimizer.gammalb *= 1e3
-        print("increase lower bound...")
-      print("-------------------------------")
       
       # train loss
       writer.add_scalar("Loss/train", avg_loss, t)

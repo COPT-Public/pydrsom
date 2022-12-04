@@ -62,7 +62,8 @@ def train(net, epoch, device, data_loader, name, optimizer, criterion):
       print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
   
   accuracy = 100. * correct / total
-  print('train acc %.3f' % accuracy)
+  print('train acc  %.3f' % accuracy)
+  print('train loss %.3f' % (train_loss / len(data_loader)))
   
   return accuracy, train_loss / len(data_loader)
 
@@ -84,6 +85,6 @@ def test(net, device, data_loader, criterion):
       correct += predicted.eq(targets).sum().item()
   
   accuracy = 100. * correct / total
-  print(' test acc %.3f' % accuracy)
-  
+  print(' test acc  %.3f' % accuracy)
+  print(' test loss %.3f' % (test_loss / len(data_loader)))
   return accuracy, test_loss / len(data_loader)
