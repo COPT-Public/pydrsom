@@ -36,7 +36,9 @@ parser.add_argument("--optim",
                     type=str,
                     default='drsom',
                     choices=[
-                      'adam', 'sgd4',
+                      'adam',
+                      'sgd1', 'sgd4',
+                      'sgd2', 'sgd3',
                       'drsom',
                     ])
 parser.add_argument("--model",
@@ -225,7 +227,6 @@ def train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval):
 def test(dataloader, model, loss_fn):
   size = len(dataloader.dataset)
   num_batches = len(dataloader)
-  model.eval()
   test_loss, correct = 0, 0
   with torch.no_grad():
     for batch, (X, y) in enumerate(dataloader):
@@ -299,20 +300,20 @@ if __name__ == '__main__':
     'sgd2': torch.optim.SGD,
     'sgd3': torch.optim.SGD,
     'sgd4': torch.optim.SGD,
-    'lbfgs': torch.optim.LBFGS,
+    # 'lbfgs': torch.optim.LBFGS,
     'drsom': DRSOM,
   }
   method_kwargs = {
     'adam':
       dict(lr=0.001, betas=(0.99, 0.999)),
     'sgd1':
-      dict(lr=0.001, momentum=0.95),
+      dict(lr=0.01),
     'sgd2':
-      dict(lr=0.001, momentum=0.90),
+      dict(lr=0.001),
     'sgd3':
-      dict(lr=0.001, momentum=0.85),
+      dict(lr=0.001, momentum=0.95),
     'sgd4':
-      dict(lr=0.001, momentum=0.99),
+      dict(lr=0.001, momentum=0.9),
     'lbfgs':
       dict(line_search_fn='strong_wolfe', max_iter=itermax),
     'drsom':

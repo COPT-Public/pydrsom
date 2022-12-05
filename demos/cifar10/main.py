@@ -35,7 +35,7 @@ def get_parser():
   parser.add_argument(
     '--model', default='resnet', type=str, help='model',
     choices=[
-      'resnet', 'resnet18',
+      'resnet18', 'resnet34'
     ]
   )
   parser.add_argument(
@@ -53,7 +53,7 @@ def get_parser():
     help='convergence speed term of AdaBound'
   )
   # sgd & adam
-  parser.add_argument('--momentum', default=0.99, type=float, help='momentum term')
+  parser.add_argument('--momentum', default=0.95, type=float, help='momentum term')
   parser.add_argument('--beta1', default=0.9, type=float, help='Adam coefficients beta_1')
   parser.add_argument('--beta2', default=0.999, type=float, help='Adam coefficients beta_2')
   parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
@@ -68,24 +68,40 @@ def get_parser():
   parser.add_argument("--hessian_window", required=False, type=int, default=1)
   parser.add_argument('--drsom_beta1', default=50, type=float, help='DRSOM coefficients beta_1')
   parser.add_argument('--drsom_beta2', default=30, type=float, help='DRSOM coefficients beta_2')
-  parser.add_argument('--gamma_power', default=1e3, type=float,
-                      help='gamma multiplier: (hyper) DRSOM coefficients for adjusting gamma lower bound')
-  parser.add_argument('--radius_power', default=1e1, type=float,
-                      help='radius multiplier: (hyper) DRSOM coefficients for adjusting radius upper bound')
+  
   parser.add_argument('--tflogger', default="/tmp/", type=str, help='tf logger directory')
   
   # learning rate scheduler
   parser.add_argument(
-    '--lrstep', default=15, type=int,
+    '--lrstep', default=20, type=int,
     help='step for learning rate scheduler\n'
          ' - for Adam/SGD, it corresponds to usual step definition for the lr scheduler\n'
-         ' - for DRSOM, it says, in every `lrstep` step, we increase the lower bound on gamma via `gamma *= gamma_power` (such that the stepsize is decreased)'
   )
   parser.add_argument(
     '--lrcoeff', default=0.5, type=float,
     help='step for learning rate scheduler\n'
          ' - for Adam/SGD, it corresponds to usual step definition for the lr scheduler\n'
-         ' - for DRSOM, it says, in every `lrstep` step, we increase the lower bound on gamma via `gamma *= gamma_power` (such that the stepsize is decreased)'
+  )
+  parser.add_argument(
+    '--drsom_decay_window', default=8000, type=int,
+    help="""
+    this is an analogue of `step size of the learning rate scheduler` for DRSOM,
+      it basically says, in every `drsom_decay_window` steps:
+      - we increase the lower bound on gamma via:
+          gamma *= drsom_decay_step,
+        such that the stepsize is decreased)
+      - or decrease radius:
+          radius *= drsom_decay_radius_step,
+        if you choose to use the trust-region mode
+        """
+  )
+  parser.add_argument(
+    '--drsom_decay_step', default=5e2, type=float,
+    help='see drsom_decay_window'
+  )
+  parser.add_argument(
+    '--drsom_decay_radius_step', default=2e-1, type=float,
+    help='see drsom_decay_window, this only works if you use the trust-region mode.'
   )
   
   return parser
@@ -122,8 +138,8 @@ def build_dataset(args):
 def build_model(args, device, ckpt=None):
   print('==> Building model..')
   net = {
-    'resnet34': ResNet34,
-    'resnet18': ResNet18
+    'resnet18': ResNet18,
+    'resnet34': ResNet34
   }[args.model]()
   print(f'==> Building model {args.model}')
   net = net.to(device)
@@ -176,7 +192,10 @@ def create_optimizer(args, model, start_epoch=0):
       option_tr=args.option_tr,
       beta1=args.drsom_beta1,
       beta2=args.drsom_beta2,
-      max_iter=args.itermax
+      max_iter=args.itermax,
+      decay_window=args.drsom_decay_window,
+      decay_step=args.drsom_decay_step,
+      decay_radius_step=args.drsom_decay_radius_step
     )
   elif args.optim == 'drsomk':
     return DRSOMK(
@@ -230,18 +249,11 @@ def main():
   print(f"Using optimizer:\n {log_name}")
   
   writer = SummaryWriter(log_dir=os.path.join(args.tflogger, log_name))
-  gammabase = optimizer.gammalb if args.optim.startswith("drsom") else 0
-  radiusbase = optimizer.radiusub if args.optim.startswith("drsom") else 0
   
   for epoch in range(start_epoch, start_epoch + args.epoch):
     try:
       if args.optim.startswith("drsom"):
         pass
-        # print(f"lambda increased factor {args.gamma_power}")
-        # optimizer.gammalb = gammabase * args.gamma_power ** ((epoch + 1) // args.lrstep)
-        # optimizer.radiusub = radiusbase / args.radius_power ** ((epoch + 1) // args.lrstep)
-        # print(f"gamma lower bound changed to {optimizer.gammalb}")
-        # print(f"radii upper bound changed to {optimizer.radiusub}")
       
       else:
         scheduler.step()

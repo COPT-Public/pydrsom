@@ -30,7 +30,7 @@ class DRSOMB(torch.optim.Optimizer):
       beta2=3e1,
       hessian_window=1,
       thetas=(0.99, 0.999),
-      decay_window=15,
+      decay_window=8000,
       decay_step=5e2,
       decay_radius_step=2e-1,
       eps=1e-8,
@@ -279,8 +279,7 @@ class DRSOMB(torch.optim.Optimizer):
     def sampling():
       # trial step in the ellipsoid
       a2 = [coordinates(dim, j, np.exp(-s) * delta) for j in range(dim) for s in range(k_diag)]
-      # a = [np.random.uniform(0, 1, size=dim) * delta for _ in range(k_offdiag)]
-      a = []
+      a = [np.random.uniform(0, 1, size=dim) * delta for _ in range(k_offdiag)]
       a = [*a2, *a]
       return a
     
@@ -428,11 +427,13 @@ class DRSOMB(torch.optim.Optimizer):
     if DRSOM_VERBOSE:
       torch.autograd.set_detect_anomaly(True)
     n_iter = 0
-    if (self.iter + 1 % self.decay_window) == 0:
+    if ((self.iter + 1) % self.decay_window) == 0:
       self.gammalb *= self.decay_step
       self.radiusub *= self.decay_radius_step
+      print(f"adjust regularization terms@: {self.iter} and {self.decay_window}")
       print(f"current regularization terms: {self.gammalb} and {self.radiusub}")
     if self.iter == 0:
+      print(f"adjust regularization terms@: {self.iter} and {self.decay_window}")
       print(f"current regularization terms: {self.gammalb} and {self.radiusub}")
     
     loss = closure()
