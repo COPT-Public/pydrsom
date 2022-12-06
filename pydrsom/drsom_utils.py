@@ -8,10 +8,16 @@ import numpy as np
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 DRSOM_VERBOSE = int(os.environ.get('DRSOM_VERBOSE', 0))
-DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 0))
-DRSOM_MODE_QP = int(os.environ.get('DRSOM_MODE_QP', 0))
+# QP construction (0-hvp, 1-interpolation)
+DRSOM_MODE_QP = int(os.environ.get('DRSOM_MODE_QP', 1))
+# hvp strategy
 DRSOM_MODE_HVP = int(os.environ.get('DRSOM_MODE_HVP', 0))
+# subproblem strategy
 DRSOM_MODE_TRS = int(os.environ.get('DRSOM_MODE_TRS', 0))
+# gamma and radius decay
+DRSOM_MODE_DECAY = int(os.environ.get('DRSOM_MODE_DECAY', 1))
+# direction
+DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 0))
 if DRSOM_MODE == 0:
   DRSOM_DIRECTIONS = ['momentum']
 elif DRSOM_MODE == 1:

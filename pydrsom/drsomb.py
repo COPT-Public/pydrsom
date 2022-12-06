@@ -102,6 +102,7 @@ class DRSOMB(torch.optim.Optimizer):
     # gamma & lower bound on gamma
     self.gamma = gamma
     self.gammalb = 1e-12
+    self.gammalb0 = 1e-12
     # maximum step size
     self.radius = 1e1
     self.radiusub = 1e1
@@ -128,7 +129,7 @@ class DRSOMB(torch.optim.Optimizer):
     #########################
   
   def get_name(self):
-    return f"drsom-b:qp@{DRSOM_MODE_QP}d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}:w@{self.decay_window}-{self.decay_step}"
+    return f"drsom-b:qp@{DRSOM_MODE_QP}d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}:[{DRSOM_MODE_DECAY}w@{self.decay_window}-{self.decay_step}]"
   
   def get_params(self):
     """
@@ -426,15 +427,9 @@ class DRSOMB(torch.optim.Optimizer):
     closure = torch.enable_grad()(closure)
     if DRSOM_VERBOSE:
       torch.autograd.set_detect_anomaly(True)
-    n_iter = 0
-    if ((self.iter + 1) % self.decay_window) == 0:
-      self.gammalb *= self.decay_step
-      self.radiusub *= self.decay_radius_step
-      print(f"adjust regularization terms@: {self.iter} and {self.decay_window}")
-      print(f"current regularization terms: {self.gammalb} and {self.radiusub}")
-    if self.iter == 0:
-      print(f"adjust regularization terms@: {self.iter} and {self.decay_window}")
-      print(f"current regularization terms: {self.gammalb} and {self.radiusub}")
+    
+    #
+    self.adjust_gamma_and_radius()
     
     loss = closure()
     
@@ -553,7 +548,6 @@ class DRSOMB(torch.optim.Optimizer):
         iter_adj += 1
       
       self.iter += 1
-      n_iter += 1
       
       if not acc_step:
         # if this step is not acc. (after max # of iteration for adjustment)
@@ -563,3 +557,25 @@ class DRSOMB(torch.optim.Optimizer):
         self.gamma = self.gammalb
     
     return loss
+  
+  def adjust_gamma_and_radius(self):
+    if DRSOM_MODE_DECAY == 0:
+      print("using linear rule")
+      if ((self.iter + 1) % self.decay_window) == 0:
+        self.gammalb *= self.decay_step
+        self.radiusub *= self.decay_radius_step
+        print(f"adjust regularization terms@: {self.iter} and {self.decay_window}")
+    elif DRSOM_MODE_DECAY == 1:
+      # try
+      # gamma = gamma_0 * gamma_max * sin(pi * (k / M) / 2)
+      # - k iteration #
+      # - M total iterations
+      # - gamma_0, gamma_max, initial and target
+      self.gammalb = max(
+        self.gammalb0,
+        self.gammalb0 * 1e8 * np.sin(np.pi / 2 * (self.iter + 1) / 470 / 80)
+      )
+
+    if ((self.iter + 1) % 1000 ) == 0:
+      print(f"current regularization terms: {self.gammalb} and {self.radiusub}\n"
+            f"using rule {DRSOM_MODE_DECAY}")
