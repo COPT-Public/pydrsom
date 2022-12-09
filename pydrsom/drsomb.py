@@ -18,6 +18,30 @@ from torch.nn.utils import parameters_to_vector
 from .drsom_utils import *
 
 
+class DRSOMDecayRules(object):
+  def __init__(self, **kwargs):
+    # linear rule
+    self.decay_mode = DRSOM_MODE_DECAY
+    self.decay_window = kwargs.get("decay_window", 8000)
+    self.decay_step = kwargs.get("decay_step", 5e2)
+    self.decay_radius_step = kwargs.get("decay_radius_step", 2e-1)
+    # sin rule
+    self.decay_sin_rel_max = kwargs.get("decay_sin_rel_max", 1e8)
+    self.decay_sin_min_scope = kwargs.get("decay_sin_min_scope", 500)
+    self.decay_sin_max_scope = kwargs.get("decay_sin_max_scope", 37600)
+    print(self.print())
+  
+  def print(self):
+    import json
+    return json.dumps(self.__dict__, indent=2)
+  
+  def __str__(self):
+    if DRSOM_MODE_DECAY == 0:
+      return f"[{DRSOM_MODE_DECAY}w@{self.decay_window}-{self.decay_step}]"
+    else:
+      return f"[{DRSOM_MODE_DECAY}w@{self.decay_sin_rel_max:.2e}:{self.decay_sin_min_scope:.2e}-{self.decay_sin_max_scope:.2e}]"
+
+
 class DRSOMB(torch.optim.Optimizer):
   
   def __init__(
@@ -28,11 +52,8 @@ class DRSOMB(torch.optim.Optimizer):
       gamma=1e-6,
       beta1=5e1,
       beta2=3e1,
-      hessian_window=1,
+      decayrules: Optional[DRSOMDecayRules] = DRSOMDecayRules(),
       thetas=(0.99, 0.999),
-      decay_window=8000,
-      decay_step=5e2,
-      decay_radius_step=2e-1,
       eps=1e-8,
   ):
     """
@@ -101,15 +122,12 @@ class DRSOMB(torch.optim.Optimizer):
     ##########################
     # gamma & lower bound on gamma
     self.gamma = gamma
-    self.gammalb = 1e-12
-    self.gammalb0 = 1e-12
+    self.gammalb = self.gammalb0 = 1e-12
     # maximum step size
     self.radius = 1e1
     self.radiusub = 1e1
     # decay rules
-    self.decay_window = decay_window
-    self.decay_step = decay_step
-    self.decay_radius_step = decay_radius_step
+    self.decayrule: DRSOMDecayRules = decayrules
     # gamma increasing rules
     self.beta1 = beta1
     self.beta2 = beta2
@@ -129,7 +147,7 @@ class DRSOMB(torch.optim.Optimizer):
     #########################
   
   def get_name(self):
-    return f"drsom-b:qp@{DRSOM_MODE_QP}d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}:[{DRSOM_MODE_DECAY}w@{self.decay_window}-{self.decay_step}]"
+    return f"drsom-b:qp@{DRSOM_MODE_QP}d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}:{self.decayrule.__str__()}"
   
   def get_params(self):
     """
@@ -486,7 +504,7 @@ class DRSOMB(torch.optim.Optimizer):
         if rho <= self.zeta1:
           # be more conservative
           self.gamma = max(self.gamma * self.beta1, 1e-4)
-          self.radius = max(self.radius * self.decay_radius_step, 1e-8)
+          self.radius = max(self.radius * self.decayrule.decay_radius_step, 1e-8)
         # @note:
         # do we need "not very successful" adjustments?
         # elif self.zeta1 < rho < self.zeta2:
@@ -504,7 +522,7 @@ class DRSOMB(torch.optim.Optimizer):
             )
             # cannot exceed radius max
             self.radius = min(
-              self.radius / self.decay_radius_step,
+              self.radius / self.decayrule.decay_radius_step,
               self.radiusub
             )
         
@@ -560,22 +578,50 @@ class DRSOMB(torch.optim.Optimizer):
   
   def adjust_gamma_and_radius(self):
     if DRSOM_MODE_DECAY == 0:
-      print("using linear rule")
-      if ((self.iter + 1) % self.decay_window) == 0:
-        self.gammalb *= self.decay_step
-        self.radiusub *= self.decay_radius_step
-        print(f"adjust regularization terms@: {self.iter} and {self.decay_window}")
+      print("using step rule")
+      if ((self.iter + 1) % self.decayrule.decay_window) == 0:
+        self.gammalb *= self.decayrule.decay_step
+        self.radiusub *= self.decayrule.decay_radius_step
+        print(f"adjust regularization terms@: {self.iter} and {self.decayrule.decay_window}")
+    
     elif DRSOM_MODE_DECAY == 1:
-      # try
-      # gamma = gamma_0 * gamma_max * sin(pi * (k / M) / 2)
+      # using the following formulae
+      # gamma = gamma_0 * gamma_max *
+      #   sin[pi/2/M * max(k - m, 0)]
       # - k iteration #
       # - M total iterations
       # - gamma_0, gamma_max, initial and target
       self.gammalb = max(
         self.gammalb0,
-        self.gammalb0 * 1e8 * np.sin(np.pi / 2 * (self.iter + 1) / 470 / 80)
+        self.gammalb0 * self.decayrule.decay_sin_rel_max *
+        np.sin(
+          0.5 * np.pi / self.decayrule.decay_sin_max_scope *
+          max(0, self.iter + 1 - self.decayrule.decay_sin_min_scope)
+        )
       )
-
-    if ((self.iter + 1) % 1000 ) == 0:
+      
+    elif DRSOM_MODE_DECAY == 2:
+      # using the following formulae
+      # gamma = gamma_0 * gamma_max *
+      #   1/{1 + exp[-10 + 20/M*(x)]}
+      # - k iteration #
+      # - M total iterations
+      # - gamma_0, gamma_max, initial and target
+      self.gammalb = \
+        self.gammalb0 * self.decayrule.decay_sin_rel_max \
+        / (1 + np.exp(10 - 20 * (self.iter + 1) / self.decayrule.decay_sin_max_scope))
+    
+    elif DRSOM_MODE_DECAY == 3:
+      # using the following formulae
+      # gamma = gamma_0 * gamma_max *
+      #   1/{1 + exp[-10 + 20/M*(x)]}
+      # - k iteration #
+      # - M total iterations
+      # - gamma_0, gamma_max, initial and target
+      self.gammalb = self.gammalb0 * (
+            1 + self.decayrule.decay_sin_rel_max *
+            (self.iter + 1) / self.decayrule.decay_sin_max_scope)
+      
+    if ((self.iter + 1) % 1000) == 0:
       print(f"current regularization terms: {self.gammalb} and {self.radiusub}\n"
             f"using rule {DRSOM_MODE_DECAY}")

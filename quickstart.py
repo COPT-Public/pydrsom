@@ -12,21 +12,18 @@ A quickstart script for DRSOM on Fashion-MNIST dataset.
 
 import argparse
 import json
-import os
-import time
 
 import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 from pprint import pprint
 
-import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 
-from pydrsom.drsomb import DRSOMB as DRSOM
+from pydrsom.drsom import DRSOMB as DRSOM
 from pydrsom.drsom_utils import *
 
 parser = argparse.ArgumentParser(
@@ -51,19 +48,11 @@ parser.add_argument("--batch", required=False, type=int, default=128)
 parser.add_argument("--epoch", required=False, type=int, default=5)
 parser.add_argument("--interval", required=False, type=int, default=20)
 parser.add_argument("--bool_decay", required=False, type=int, default=1)
-parser.add_argument("--option_tr",
-                    required=False,
-                    type=str,
-                    default='p',
-                    choices=['a', 'p'])
-parser.add_argument("--hessian_window", required=False, type=int, default=1)
-parser.add_argument('--drsom_beta1', default=50, type=float, help='DRSOM coefficients beta_1')
-parser.add_argument('--drsom_beta2', default=30, type=float, help='DRSOM coefficients beta_2')
-parser.add_argument("--itermax", required=False, type=int, default=15,
-                    help='maximum iteration for inner optimization, for LBFGS and DRSOM')
 parser.add_argument('--tflogger', default="run", type=str, help='tf logger')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ckpt_name', type=str, help='resume from checkpoint')
+
+add_parser_options(parser)
 
 
 class CNNModel(nn.Module):
@@ -196,7 +185,11 @@ def train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval):
       loss = loss_fn(output, y)
       if not backward:
         return loss
-      loss.backward(create_graph=True)
+      if DRSOM_MODE_QP == 0 or DRSOM_VERBOSE == 1:
+        # only need for hvp
+        loss.backward(create_graph=True)
+      else:
+        loss.backward()
       return loss
     
     # backpropagation
@@ -281,12 +274,7 @@ if __name__ == '__main__':
   
   training_data.data = training_data.data[:args.data_size]
   training_data.targets = training_data.targets[:args.data_size]
-  nbatch = args.batch
-  nepoch = args.epoch
-  ninterval = args.interval
-  itermax = args.itermax
-  option_tr = args.option_tr
-  hessian_window = args.hessian_window
+  
   betas = (0.96, 0.99) if args.bool_decay else (0, 0)
   
   # get cpu or gpu device for training.
@@ -315,16 +303,11 @@ if __name__ == '__main__':
     'sgd4':
       dict(lr=0.001, momentum=0.9),
     'lbfgs':
-      dict(line_search_fn='strong_wolfe', max_iter=itermax),
-    'drsom':
       dict(
-        max_iter=itermax,
-        thetas=(0.99, 0.999),
-        option_tr=args.option_tr,
-        hessian_window=hessian_window,
-        beta1=args.drsom_beta1,
-        beta2=args.drsom_beta2,
+        line_search_fn='strong_wolfe',
+        max_iter=args.itermax
       ),
+    'drsom': render_args(args)
   }
   
   pprint(method_kwargs)
@@ -349,26 +332,30 @@ if __name__ == '__main__':
     start_epoch = 0
   # create data loaders.
   train_dataloader = DataLoader(training_data,
-                                batch_size=nbatch,
+                                shuffle=True,
+                                batch_size=args.batch,
                                 generator=torch.Generator().manual_seed(1))
   test_dataloader = DataLoader(test_data,
-                               batch_size=nbatch,
+                               shuffle=True,
+                               batch_size=args.batch,
                                generator=torch.Generator().manual_seed(1))
   # start
   st = time.time()
   func = methods[name]
   func_kwargs = method_kwargs.get(name, {})
+  
   optimizer = func(model.parameters(), **func_kwargs)
+  
   # log name
   log_name = query_name(optimizer, name, args, ckpt)
   writer = SummaryWriter(log_dir=os.path.join(args.tflogger, log_name))
   start_time = time.time()
   print(f"Using optimizer:\n {log_name}")
-  for t in range(start_epoch, start_epoch + nepoch):
+  for t in range(start_epoch, start_epoch + args.epoch):
     try:
       print(f"epoch {t}")
       _, avg_loss, acc = train(train_dataloader, name, model, loss_fn,
-                               optimizer, ninterval)
+                               optimizer, args.interval)
       
       # train loss
       writer.add_scalar("Loss/train", avg_loss, t)
