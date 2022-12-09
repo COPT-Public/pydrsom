@@ -21,9 +21,7 @@ class DRSOMB(torch.optim.Optimizer):
       params,
       max_iter=15,
       option_tr="a",
-      gamma=1e-6,
-      beta1=5e1,
-      beta2=3e1,
+      adjrules: Optional[DRSOMAdjustRules] = DRSOMAdjustRules(),
       decayrules: Optional[DRSOMDecayRules] = DRSOMDecayRules(),
       thetas=(0.99, 0.999),
       eps=1e-8,
@@ -92,23 +90,16 @@ class DRSOMB(torch.optim.Optimizer):
     # TRS/Regularization params
     ##########################
     # gamma & lower bound on gamma
-    self.gamma = gamma
+    self.gamma = 1e-6
     self.gammalb = self.gammalb0 = 1e-12
     # maximum step size
     self.radius = 1e1
     self.radiusub = 1e1
     # decay rules
     self.decayrule: DRSOMDecayRules = decayrules
-    # gamma increasing rules
-    self.beta1 = beta1
-    self.beta2 = beta2
-    ##########################
-    # step acc rules
-    ##########################
+    self.adjrule: DRSOMAdjustRules = adjrules
     self.delta = 1e-3
-    self.eta = 0.08
-    self.zeta1 = 0.25
-    self.zeta2 = 0.75
+    
     ##########################
     # weight decay of the past
     ##########################
@@ -119,7 +110,7 @@ class DRSOMB(torch.optim.Optimizer):
     #########################
   
   def get_name(self):
-    return f"drsom-b:qp@{DRSOM_MODE_QP}d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}:{self.decayrule.__str__()}"
+    return f"drsom-b:qp@{DRSOM_MODE_QP}d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}:{self.decayrule.__str__()}-{self.adjrule.__str__()}"
   
   def get_params(self):
     """
@@ -169,10 +160,9 @@ class DRSOMB(torch.optim.Optimizer):
     return TRS._solve_alpha(self, Q, c, tr)
   
   @drsom_timer
-  def compute_step(self, option_tr="p"):
-    dim = len(self.c)
+  def compute_step(self):
     self.alpha, self.alpha_norm = self.solve_alpha(
-      self.Q, self.c, tr=self.G if option_tr == "p" else torch.eye(dim)
+      self.Q, self.c, tr=self.G
     )
     
     ####################################
@@ -280,8 +270,15 @@ class DRSOMB(torch.optim.Optimizer):
         for j in range(dim)
         for s in range(k_diag)
       ]
-      # a = []
-      a = [np.random.uniform(0, delta, size=dim) for _ in range(k_offdiag)]
+      
+      if dim > 1:
+        a = [
+          sum(coordinates(dim, j, np.exp(-s) * delta)
+              for j in range(dim)) / 2
+          for s in range(k_diag)
+        ]
+      else:
+        a = []
       a = [*a2, *a]
       return a
     
@@ -349,18 +346,23 @@ class DRSOMB(torch.optim.Optimizer):
     dim = len(directions)
     # construct G (the inner products)
     G = torch.zeros((dim, dim), requires_grad=False, device="cpu")
-    for i in range(dim):
-      for j in range(i, dim):
-        for p in self._params:
-          v = directions[i][p]
-          u = directions[j][p]
-          # compute G[i,j]
-          G[i, j] += torch.mul(u, v).sum().cpu().detach()
-    
-    # keep symmetry
-    for i in range(dim):
-      for j in range(i):
-        G[i, j] = G[j, i]
+    if self.option_tr == 'p':
+      for i in range(dim):
+        for j in range(i, dim):
+          for p in self._params:
+            v = directions[i][p]
+            u = directions[j][p]
+            # compute G[i,j]
+            G[i, j] += torch.mul(u, v).sum().cpu().detach()
+      # keep symmetry
+      for i in range(dim):
+        for j in range(i):
+          G[i, j] = G[j, i]
+          
+    else:
+      # simply use the eye matrix
+      for i in range(dim):
+        G[i, i] = 1.0
     
     # construct c
     c = torch.zeros(dim, requires_grad=False, device="cpu")
@@ -458,10 +460,10 @@ class DRSOMB(torch.optim.Optimizer):
     with torch.no_grad():
       while iter_adj < self._max_iter_adj:
         # solve alpha
-        trs_est = self.compute_step(option_tr=self.option_tr)
+        trs_est = self.compute_step()
         if trs_est < 0:
-          self.gamma = max(self.gamma * self.beta1, 1e-4)
-          self.radius = max(self.radius / np.sqrt(self.beta1), 1e-12)
+          self.gamma = max(self.gamma * self.adjrule.beta1, 1e-4)
+          self.radius = max(self.radius / np.sqrt(self.adjrule.beta1), 1e-12)
           if DRSOM_VERBOSE:
             pprint(self.logline)
           continue
@@ -486,9 +488,9 @@ class DRSOMB(torch.optim.Optimizer):
         # update the trust-region radius (implicitly by gamma/lambda)
         lmb_dec = 0
         gamma_old = self.gamma
-        if rho <= self.zeta1:
+        if rho <= self.adjrule.zeta1:
           # be more conservative
-          self.gamma = max(self.gamma * self.beta1, 1e-4)
+          self.gamma = max(self.gamma * self.adjrule.beta1, 1e-4)
           self.radius = max(
             self.radius * self.decayrule.decay_radius_step, 1e-8
           )
@@ -500,12 +502,12 @@ class DRSOMB(torch.optim.Optimizer):
         #     self.gamma / self.beta2
         #   )
         else:
-          if rho >= self.zeta2:
+          if rho >= self.adjrule.zeta2:
             # be more aggressive
             lmb_dec = 1
             self.gamma = max(
               self.gammalb,
-              min(self.gamma / self.beta2, np.log(self.gamma)),
+              min(self.gamma / self.adjrule.beta2, np.log(self.gamma)),
             )
             # cannot exceed radius max
             self.radius = min(
@@ -513,7 +515,7 @@ class DRSOMB(torch.optim.Optimizer):
               self.radiusub,
             )
         
-        acc_step = rho > self.eta
+        acc_step = rho > self.adjrule.eta
         if DRSOM_VERBOSE:
           self.logline["dQ"] = "{:+.2e}".format(trs_est.item())
           self.logline["df"] = "{:+.2e}".format(loss_dec.item())
@@ -638,4 +640,4 @@ class DRSOMB(torch.optim.Optimizer):
     if DRSOM_MODE_DELTA == 0:
       self.delta = max(1e-3, min(self.alpha_norm, 1e1))
     elif DRSOM_MODE_DELTA == 1:
-      self.delta = max(1e-3, min(self.alpha_norm, 1e-1))
+      self.delta = max(1e-3, min(self.alpha_norm, 1e-2))

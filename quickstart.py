@@ -51,6 +51,7 @@ parser.add_argument("--bool_decay", required=False, type=int, default=1)
 parser.add_argument('--tflogger', default="run", type=str, help='tf logger')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ckpt_name', type=str, help='resume from checkpoint')
+parser.add_argument('--seed', type=int, help='manual seed')
 
 add_parser_options(parser)
 
@@ -334,11 +335,11 @@ if __name__ == '__main__':
   train_dataloader = DataLoader(training_data,
                                 shuffle=True,
                                 batch_size=args.batch,
-                                generator=torch.Generator().manual_seed(1))
+                                generator=torch.Generator().manual_seed(args.seed))
   test_dataloader = DataLoader(test_data,
                                shuffle=True,
                                batch_size=args.batch,
-                               generator=torch.Generator().manual_seed(1))
+                               generator=torch.Generator().manual_seed(args.seed))
   # start
   st = time.time()
   func = methods[name]
@@ -348,7 +349,7 @@ if __name__ == '__main__':
   
   # log name
   log_name = query_name(optimizer, name, args, ckpt)
-  writer = SummaryWriter(log_dir=os.path.join(args.tflogger, log_name))
+  writer = SummaryWriter(log_dir=os.path.join(f"{args.tflogger}-{args.seed}", log_name))
   start_time = time.time()
   print(f"Using optimizer:\n {log_name}")
   for t in range(start_epoch, start_epoch + args.epoch):

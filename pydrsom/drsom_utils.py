@@ -242,6 +242,37 @@ def add_parser_options(parser: ArgumentParser):
     type=float,
     help="see drsom_decay_sin_rel_max",
   )
+  ##################
+  parser.add_argument(
+    "--drsom_adjust_eta",
+    default=0.08,
+    type=float,
+    help="see drsom_decay_sin_rel_max",
+  )
+  parser.add_argument(
+    "--drsom_adjust_beta1",
+    default=50,
+    type=float,
+    help="see drsom_decay_sin_rel_max",
+  )
+  parser.add_argument(
+    "--drsom_adjust_beta2",
+    default=30,
+    type=float,
+    help="see drsom_decay_sin_rel_max",
+  )
+  parser.add_argument(
+    "--drsom_adjust_zeta1",
+    default=0.25,
+    type=float,
+    help="see drsom_decay_sin_rel_max",
+  )
+  parser.add_argument(
+    "--drsom_adjust_zeta2",
+    default=0.75,
+    type=float,
+    help="see drsom_decay_sin_rel_max",
+  )
 
 
 def render_args(args):
@@ -254,12 +285,18 @@ def render_args(args):
     decay_sin_min_scope=args.drsom_decay_sin_min_scope,
     decay_sin_max_scope=args.drsom_decay_sin_max_scope,
   )
+  drsom_adjust_rules = DRSOMAdjustRules(
+    adjust_eta=args.drsom_adjust_eta,
+    adjust_beta1=args.drsom_adjust_beta1,
+    adjust_beta2=args.drsom_adjust_beta2,
+    adjust_zeta1=args.drsom_adjust_zeta1,
+    adjust_zeta2=args.drsom_adjust_zeta2,
+  )
   return dict(
     option_tr=args.option_tr,
-    beta1=args.drsom_beta1,
-    beta2=args.drsom_beta2,
     max_iter=args.itermax,
     decayrules=drsom_decay_rules,
+    adjrules=drsom_adjust_rules,
   )
 
 
@@ -287,3 +324,23 @@ class DRSOMDecayRules(object):
   
   def __str__(self):
     return f"[{DRSOM_MODE_DECAY}w@{self.decay_sin_rel_max:.2e}:{self.decay_sin_min_scope:.2e}-{self.decay_sin_max_scope:.2e}]"
+
+
+class DRSOMAdjustRules(object):
+  def __init__(self, **kwargs):
+    # quadratic approx. rules
+    self.eta = kwargs.get("adjust_eta", 0.08)
+    self.beta1 = kwargs.get("adjust_beta1", 50)
+    self.beta2 = kwargs.get("adjust_beta2", 30)
+    self.zeta1 = kwargs.get("adjust_zeta1", 0.25)
+    self.zeta2 = kwargs.get("adjust_zeta2", 0.75)
+    
+    print(self.print())
+  
+  def print(self):
+    import json
+    
+    return json.dumps(self.__dict__, indent=2)
+  
+  def __str__(self):
+    return f"[{self.beta1}-{self.beta2}-{self.zeta1}-{self.zeta2}]"
