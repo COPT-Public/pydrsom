@@ -282,13 +282,7 @@ class DRSOMB(torch.optim.Optimizer):
       a = [*a2, *a]
       return a
     
-    if DRSOM_VERBOSE:
-      ###########################################################
-      # compare with HVP
-      _ = closure(backward=True)
-      Q1 = self.compute_Q_via_hvp(directions, style=0)
-      q1 = Q1.triu().cpu().detach().numpy()
-      q1 = q1[q1.nonzero()]
+    
     ###########################################################
     # we compute k > dim*(dim+1)/2 directions so that
     #   Q can be determined by solving a linear system;
@@ -333,7 +327,15 @@ class DRSOMB(torch.optim.Optimizer):
       for j in range(0, i):
         Q[i, j] = Q[j, i]
     del d_new
-    
+    if DRSOM_VERBOSE:
+      ###########################################################
+      # compare with HVP
+      _ = closure(backward=True)
+      Q1 = self.compute_Q_via_hvp(directions, style=0)
+      q1 = Q1.triu().cpu().detach().numpy()
+      q1 = q1[q1.nonzero()]
+      print(q1)
+      print(q)
     return Q
   
   @drsom_timer

@@ -24,7 +24,8 @@ def get_parser():
   )
   parser.add_argument(
     '--optim', default='sgd', type=str, help='optimizer',
-    choices=['sgd', 'adagrad', 'adam', 'amsgrad', 'adabound', 'amsbound', 'adahessian',
+    choices=['sgd1', 'sgd2', 'sgd3',
+             'adam',
              'drsom', 'drsomk']
   )
   parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
@@ -41,13 +42,12 @@ def get_parser():
   ##############
   # sgd & adam
   ##############
-  parser.add_argument('--momentum', default=0.95, type=float, help='momentum term')
   parser.add_argument('--beta1', default=0.9, type=float, help='Adam coefficients beta_1')
   parser.add_argument('--beta2', default=0.999, type=float, help='Adam coefficients beta_2')
   parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
   parser.add_argument('--ckpt_name', type=str, help='resume from checkpoint')
   parser.add_argument('--epoch', '-e', default=200, type=int, help='num of epoches to run')
-  parser.add_argument('--weight_decay', default=5e-4, type=float,
+  parser.add_argument('--weight_decay', default=0.0, type=float,
                       help='weight decay for optimizers')
   ##############
   # learning rate scheduler
@@ -116,20 +116,26 @@ def build_model(args, device, ckpt=None):
 
 def create_optimizer(args, model, start_epoch=0):
   model_params = model.parameters()
-  if args.optim == 'sgd':
-    return optim.SGD(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep), momentum=args.momentum,
+  if args.optim == 'sgd1':
+    return optim.SGD(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep), momentum=0.9,
                      weight_decay=args.weight_decay)
-  elif args.optim == 'adagrad':
-    return optim.Adagrad(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
-                         weight_decay=args.weight_decay)
+  if args.optim == 'sgd2':
+    return optim.SGD(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep), momentum=0.95,
+                     weight_decay=args.weight_decay)
+  if args.optim == 'sgd3':
+    return optim.SGD(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep), momentum=0.99,
+                     weight_decay=args.weight_decay)
   elif args.optim == 'adam':
     return optim.Adam(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
                       betas=(args.beta1, args.beta2),
                       weight_decay=args.weight_decay)
-  elif args.optim == 'amsgrad':
-    return optim.Adam(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
-                      betas=(args.beta1, args.beta2),
-                      weight_decay=args.weight_decay, amsgrad=True)
+  # elif args.optim == 'adagrad':
+  #   return optim.Adagrad(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
+  #                        weight_decay=args.weight_decay)
+  # elif args.optim == 'amsgrad':
+  #   return optim.Adam(model_params, args.lr * args.lrcoeff ** (start_epoch // args.lrstep),
+  #                     betas=(args.beta1, args.beta2),
+  #                     weight_decay=args.weight_decay, amsgrad=True)
   # second-order method
   # elif args.optim == 'adahessian':
   #   return Adahessian(
@@ -142,37 +148,15 @@ def create_optimizer(args, model, start_epoch=0):
   #   )
   # my second-order method
   elif args.optim == 'drsom':
-    drsom_decay_rules = DRSOMDecayRules(
-      decay_window=args.drsom_decay_window,
-      decay_step=args.drsom_decay_step,
-      decay_radius_step=args.drsom_decay_radius_step,
-      decay_sin_rel_max=args.drsom_decay_sin_rel_max,
-      decay_sin_min_scope=args.drsom_decay_sin_min_scope,
-      decay_sin_max_scope=args.drsom_decay_sin_max_scope
-    )
     return DRSOM(
       model_params,
-      option_tr=args.option_tr,
-      beta1=args.drsom_beta1,
-      beta2=args.drsom_beta2,
-      max_iter=args.itermax,
-      decayrules=drsom_decay_rules
-    )
-  elif args.optim == 'drsomk':
-    return DRSOMK(
-      model,
-      hessian_window=args.hessian_window,
-      option_tr=args.option_tr,
-      beta1=args.drsom_beta1,
-      beta2=args.drsom_beta2,
-      max_iter=args.itermax
+      **render_args(args)
     )
   else:
     raise ValueError(f"Optimizer {args.optim} not defined")
 
 
-def get_ckpt_name(model='resnet', optimizer='sgd', lr=0.1, final_lr=0.1, momentum=0.9,
-                  beta1=0.9, beta2=0.999, gamma=1e-3):
+def get_ckpt_name(model='resnet', optimizer='sgd', lr=0.1):
   """
   get checkpoint name for optimizers except for DRSOM.
   Args:
@@ -189,12 +173,10 @@ def get_ckpt_name(model='resnet', optimizer='sgd', lr=0.1, final_lr=0.1, momentu
 
   """
   name = {
-    'sgd': 'lr{}-momentum{}'.format(lr, momentum),
-    'adagrad': 'lr{}'.format(lr),
-    'adam': 'lr{}-betas{}-{}'.format(lr, beta1, beta2),
-    'amsgrad': 'lr{}-betas{}-{}'.format(lr, beta1, beta2),
-    'adabound': 'lr{}-betas{}-{}-final_lr{}-gamma{}'.format(lr, beta1, beta2, final_lr, gamma),
-    'amsbound': 'lr{}-betas{}-{}-final_lr{}-gamma{}'.format(lr, beta1, beta2, final_lr, gamma),
+    'sgd1': 'lr{}'.format(lr),
+    'sgd2': 'lr{}'.format(lr),
+    'sgd3': 'lr{}'.format(lr),
+    'adam': 'lr{}'.format(lr),
   }[optimizer]
   return '[{}]-{}-{}'.format(model, optimizer, name)
 

@@ -296,13 +296,13 @@ if __name__ == '__main__':
     'adam':
       dict(lr=0.001, betas=(0.99, 0.999)),
     'sgd1':
-      dict(lr=0.01),
-    'sgd2':
       dict(lr=0.001),
+    'sgd2':
+      dict(lr=0.001, momentum=0.9),
     'sgd3':
       dict(lr=0.001, momentum=0.95),
     'sgd4':
-      dict(lr=0.001, momentum=0.9),
+      dict(lr=0.001, momentum=0.99),
     'lbfgs':
       dict(
         line_search_fn='strong_wolfe',

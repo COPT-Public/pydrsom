@@ -46,9 +46,7 @@ def main():
     log_name = f"[{args.model}]" + "-" + query_name(optimizer, args.optim, args, ckpt)
   else:
     log_name = get_ckpt_name(
-      model=args.model, optimizer=args.optim, lr=args.lr,
-      final_lr=args.final_lr, momentum=args.momentum,
-      beta1=args.beta1, beta2=args.beta2, gamma=args.gamma
+      model=args.model, optimizer=args.optim, lr=args.lr
     )
   print(f"Using model: {args.model}")
   print(f"Using optimizer:\n {log_name}")

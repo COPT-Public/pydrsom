@@ -164,7 +164,7 @@ class TRS:
       optimizer.logline = {
         **optimizer.logline,
         '𝜆': '{:+.2e}'.format(lmd),
-        'Q/c/G': np.round(np.vstack([optimizer.Q, optimizer.c, optimizer.G]), 3),
+        'Q/c/G': np.round(np.vstack([optimizer.Q, optimizer.c, optimizer.G]), 6),
         'a': np.array(alpha.tolist()).reshape((dim, 1)),
         'ghg': '{:+.2e}'.format(Q[0, 0]),
         'ghg-': '{:+.2e}'.format(optimizer.ghg),
@@ -179,12 +179,6 @@ def add_parser_options(parser: ArgumentParser):
   parser.add_argument("--itermax", required=False, type=int, default=15)
   parser.add_argument(
     "--option_tr", required=False, type=str, default="p", choices=["a", "p"]
-  )
-  parser.add_argument(
-    "--drsom_beta1", default=50, type=float, help="DRSOM coefficients beta_1"
-  )
-  parser.add_argument(
-    "--drsom_beta2", default=30, type=float, help="DRSOM coefficients beta_2"
   )
   ##############
   # "learning rate scheduler and hyperparames" for DRSOM
