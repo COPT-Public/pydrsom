@@ -20,21 +20,12 @@ import pandas as pd
 
 NAME = {
   'adam': 'Adam',
-  'rsomf': 'DRSOM',
-  'sgd1': 'SGD-0.95',
-  'sgd2': 'SGD-0.90',
-  'sgd3': 'SGD-0.85',
-  'sgd4': 'SGD-0.99',
-  'rsomf-100': 'DRSOM-1e2',
-  'rsomf-500': 'DRSOM-5e2',
-  'rsomf-200': 'DRSOM-1e3',
-  'adam-30': 'Adam-30',
-  'adam-40': 'Adam-40',
-  'drsom-mode:0-p': "DRSOM-2D",
-  'drsom-mode:1-p': "DRSOM-2D-dg",
-  'drsom-mode:2-p': "DRSOM-3D-dg",
-  'drsom-mode:3-p': "DRSOM-2D-g-alone",
-  'drsom-mode:3-p-r-20': "DRSOM-2D-g-alone-resume"
+  'sgd1': 'SGDm-0.90',
+  'sgd2': 'SGDm-0.95',
+  'sgd3': 'SGDm-0.99',
+  # 'sgd4': 'SGD-0.99',
+  'drsom-g': 'DRSOM-g',
+  'drsom-gd': 'DRSOM-g+d',
 }
 dfs = {}
 dirin = sys.argv[1]
@@ -63,9 +54,9 @@ for f in os.listdir(dirin):
 
 
 def choose_color(m):
-  if m == 'rsomf':
+  if m == 'drsom-g':
     return 'black'
-  if m == 'rsomf-100':
+  if m == 'drsom-gd':
     return 'rgb(128,128,128)'
   return 'rgb(60,60,60)'
 
@@ -74,11 +65,10 @@ def choose_color(m):
 # plot train
 ranges = {
   'accuracy': [75, 102],
-  'acc': [75, 102],
+  'acc': [85, 102],
   'loss': [0, 1]
 }
-x_range = [0, 30]
-# methods = ['adam', 'rsomf', 'sgd']
+x_range = [0, 80]
 methods = NAME.keys()
 for cat in ['train', 'test']:
   for metric in ['loss', 'acc']:
@@ -86,13 +76,15 @@ for cat in ['train', 'test']:
       go.Line(x=dfs[cat, m].index.get_level_values(2),
               y=dfs[cat, m][metric],
               name=NAME.get(m, m),
-              line=dict(width=2, color=choose_color(m)) if m in {'rsomf', 'rsomf-100', 'rsomf-200'} else dict(width=2)
+              line=dict(width=1.5, color=choose_color(m))
+              if m.startswith("drsom")
+              else dict(width=1.5)
               )
       for m in methods
       if (cat, m) in dfs
     ]
     opt_yaxis = dict(
-      title=f"{metric}",
+      title=f"{cat}-{metric}",
       color='black',
       range=ranges[metric]
     )
@@ -102,6 +94,11 @@ for cat in ['train', 'test']:
         opt_yaxis['range'] = [-5, 1]
       else:
         opt_yaxis['range'] = [-1, 0]
+    else:
+      if cat == 'train':
+        opt_yaxis['range'] = [80, 102]
+      else:
+        opt_yaxis['range'] = [80, 96]
     
     layout = go.Layout(
       plot_bgcolor='rgba(255, 255, 255, 1)',
@@ -135,5 +132,5 @@ for cat in ['train', 'test']:
     )
     fig.update_xaxes(style_grid)
     fig.update_yaxes(style_grid)
-    fig.write_image(f"{dirout}/{cat}-{metric}.png", scale=10)
+    fig.write_image(f"{dirout}/{cat}-{metric}.png", scale=3)
     fig.write_html(f"{dirout}/{cat}-{metric}.html")
