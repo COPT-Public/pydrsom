@@ -17,13 +17,13 @@ import sys
 
 import plotly.graph_objects as go
 import pandas as pd
+from tsmoothie.smoother import *
 
 NAME = {
   'adam': 'Adam',
   'sgd1': 'SGDm-0.90',
   'sgd2': 'SGDm-0.95',
   'sgd3': 'SGDm-0.99',
-  # 'sgd4': 'SGD-0.99',
   'drsom-g': 'DRSOM-g',
   'drsom-gd': 'DRSOM-g+d',
 }
@@ -31,26 +31,25 @@ dfs = {}
 dirin = sys.argv[1]
 dirout = sys.argv[2]
 for f in os.listdir(dirin):
-  if not f.endswith('csv'):
-    continue
-  metric, cat, method = f.split('.')[-2].split("_")[0:3]
-  metric = metric.lower()
-  cat = cat.lower()
-  method = method.lower()
-  df = pd.read_csv(f"{sys.argv[1]}/{f}")
-  df = df.rename(columns={k: k.lower() for k in df.columns})
-  if df.shape[0] == 0:
-    print(f'no data for {f}')
-    continue
-  # df['Wall time'] = pd.to_datetime(df['Wall time'])
-  df['method'] = method
-  df['subset'] = cat
-  df[metric] = df['value']
-  df = df.set_index(['subset', 'method', 'step']).drop(columns=['value'])
-  if (cat, method) in dfs:
-    dfs[cat, method][metric] = df[metric]
-  else:
-    dfs[cat, method] = df
+  if f.endswith('csv'):
+    metric, cat, method = f.split('.')[-2].split("_")[0:3]
+    metric = metric.lower()
+    cat = cat.lower()
+    method = method.lower()
+    df = pd.read_csv(f"{sys.argv[1]}/{f}")
+    df = df.rename(columns={k: k.lower() for k in df.columns})
+    if df.shape[0] == 0:
+      print(f'no data for {f}')
+      continue
+    # df['Wall time'] = pd.to_datetime(df['Wall time'])
+    df['method'] = method
+    df['subset'] = cat
+    df[metric] = df['value']
+    df = df.set_index(['subset', 'method', 'step']).drop(columns=['value'])
+    if (cat, method) in dfs:
+      dfs[cat, method][metric] = df[metric]
+    else:
+      dfs[cat, method] = df
 
 
 def choose_color(m):
@@ -65,24 +64,39 @@ def choose_color(m):
 # plot train
 ranges = {
   'accuracy': [75, 102],
-  'acc': [85, 102],
+  'acc': [0.7, 1.02],
   'loss': [0, 1]
 }
-x_range = [0, 80]
+# x_range = [0, 81]
+x_range = [0, 30000]
 methods = NAME.keys()
 for cat in ['train', 'test']:
+  # for metric in ['loss', 'acc']:
   for metric in ['loss', 'acc']:
-    data = [
-      go.Line(x=dfs[cat, m].index.get_level_values(2),
-              y=dfs[cat, m][metric],
-              name=NAME.get(m, m),
-              line=dict(width=1.5, color=choose_color(m))
-              if m.startswith("drsom")
-              else dict(width=1.5)
-              )
-      for m in methods
-      if (cat, m) in dfs
-    ]
+    # for metric in ['acc']:
+    data = []
+    for m in methods:
+      if (cat, m) not in dfs:
+        continue
+      ax = dfs[cat, m].index.get_level_values(2).to_list()
+      if metric == 'loss':
+        smoother = ExponentialSmoother(window_len=20, alpha=0.05)
+      else:
+        smoother = ExponentialSmoother(window_len=10, alpha=0.05)
+
+      smoother.smooth(dfs[cat, m][metric])
+      # low, up = smoother.get_intervals('prediction_interval', confidence=0.01)
+      line = go.Line(
+        x=ax,
+        y=smoother.smooth_data[0],
+        name=NAME.get(m, m),
+        line=dict(width=1.5, color=choose_color(m))
+        if m.startswith("drsom")
+        else dict(width=1.5)
+      )
+      print(cat, metric, m, f"{smoother.smooth_data[0][-1]: .2f}")
+      data.append(line)
+
     opt_yaxis = dict(
       title=f"{cat}-{metric}",
       color='black',
@@ -96,14 +110,16 @@ for cat in ['train', 'test']:
         opt_yaxis['range'] = [-1, 0]
     else:
       if cat == 'train':
-        opt_yaxis['range'] = [80, 102]
+        # opt_yaxis['range'] = [80, 102]
+        opt_yaxis['range'] = [0.8, 1.02]
       else:
-        opt_yaxis['range'] = [80, 96]
-    
+        # opt_yaxis['range'] = [80, 96]
+        opt_yaxis['range'] = [0.80, 0.96]
+
     layout = go.Layout(
       plot_bgcolor='rgba(255, 255, 255, 1)',
       xaxis=dict(
-        title=f"epoch",
+        title=f"steps",
         color='black',
         range=x_range
       ),
@@ -134,3 +150,4 @@ for cat in ['train', 'test']:
     fig.update_yaxes(style_grid)
     fig.write_image(f"{dirout}/{cat}-{metric}.png", scale=3)
     fig.write_html(f"{dirout}/{cat}-{metric}.html")
+    # break

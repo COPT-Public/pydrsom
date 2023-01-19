@@ -59,7 +59,7 @@ add_parser_options(parser)
 class CNNModel(nn.Module):
   def __init__(self):
     super(CNNModel, self).__init__()
-    
+
     self.cnn1 = nn.Conv2d(in_channels=1,
                           out_channels=32,
                           kernel_size=5,
@@ -68,9 +68,9 @@ class CNNModel(nn.Module):
     self.relu1 = nn.ReLU()
     self.norm1 = nn.BatchNorm2d(32)
     nn.init.xavier_uniform(self.cnn1.weight)
-    
+
     self.maxpool1 = nn.MaxPool2d(kernel_size=2)
-    
+
     self.cnn2 = nn.Conv2d(in_channels=32,
                           out_channels=64,
                           kernel_size=3,
@@ -79,32 +79,32 @@ class CNNModel(nn.Module):
     self.relu2 = nn.ReLU()
     self.norm2 = nn.BatchNorm2d(64)
     nn.init.xavier_uniform(self.cnn2.weight)
-    
+
     self.maxpool2 = nn.MaxPool2d(kernel_size=2)
-    
+
     self.fc1 = nn.Linear(4096, 4096)
     self.fcrelu = nn.ReLU()
-    
+
     self.fc2 = nn.Linear(4096, 10)
-  
+
   def forward(self, x):
     out = self.cnn1(x)
     out = self.relu1(out)
     out = self.norm1(out)
-    
+
     out = self.maxpool1(out)
-    
+
     out = self.cnn2(out)
     out = self.relu2(out)
     out = self.norm2(out)
-    
+
     out = self.maxpool2(out)
-    
+
     out = out.view(out.size(0), -1)
-    
+
     out = self.fc1(out)
     out = self.fcrelu(out)
-    
+
     out = self.fc2(out)
     return out
 
@@ -113,73 +113,80 @@ class VanillaNetwork(nn.Module):
   def __init__(self):
     super(VanillaNetwork, self).__init__()
     self.flatten = nn.Flatten()
-    
+
     # case II: seems ok:
     self.layers = nn.Sequential(
       nn.Linear(28 * 28, 10),
       # nn.Linear(512, 10),
     )
-  
+
   def forward(self, x):
     x = self.flatten(x)
     logits = self.layers(x)
     return logits
 
 
-def train(dataloader, name, model, loss_fn, optimizer, ninterval):
+def train(dataloader, name, model, loss_fn, optimizer, ninterval, writer, epoch):
   if name.startswith('drsom'):
-    return train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval)
+    return train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval, writer, epoch)
   st = time.time()
   size = len(dataloader.dataset)
   model.train()
   correct = 0
   total = 0
   avg_loss = 0
+  start = epoch * len(dataloader)
   for batch, (X, y) in enumerate(dataloader):
     X, y = X.to(device), y.to(device)
-    
+
     def closure(backward=True):
       optimizer.zero_grad()
       output = model(X)
       loss = loss_fn(output, y)
       loss.backward()
       return loss
-    
+
     # backpropagation
-    
+
     loss = optimizer.step(closure=closure)
     avg_loss += loss.item()
-    
+
     # compute prediction error
     outputs = model(X)
     _, predicted = outputs.max(1)
     total += y.size(0)
     correct += predicted.eq(y).sum().item()
-    
+
     if batch % ninterval == 0:
       loss, current = loss.item(), batch * len(X)
       print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-  
+
+    # train loss
+    writer.add_scalar("Loss/train", loss, start)
+    writer.add_scalar("Acc/train", predicted.eq(y).sum().item() / y.size(0), global_step=start)
+    start += 1
+
   accuracy = 100. * correct / total
   avg_loss = avg_loss / len(dataloader)
   print('train acc %.5f' % accuracy)
   print('train avg_loss %.5f' % avg_loss)
   print('train batches: ', len(dataloader))
-  
+
   et = time.time()
   return et - st, avg_loss, accuracy
 
 
-def train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval):
+def train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval, writer, epoch):
   st = time.time()
   size = len(dataloader.dataset)
   model.train()
   correct = 0
   total = 0
   avg_loss = 0
+  start = epoch * len(dataloader)
   for batch, (X, y) in enumerate(dataloader):
     X, y = X.to(device), y.to(device)
-    
+
     def closure(backward=True):
       optimizer.zero_grad()
       output = model(X)
@@ -192,28 +199,32 @@ def train_drsom(dataloader, name, model, loss_fn, optimizer, ninterval):
       else:
         loss.backward()
       return loss
-    
+
     # backpropagation
-    
+
     loss = optimizer.step(closure=closure)
     avg_loss += loss.item()
-    
+
     # compute prediction error
     outputs = model(X)
     _, predicted = outputs.max(1)
     total += y.size(0)
     correct += predicted.eq(y).sum().item()
-    
+
     if batch % ninterval == 0:
       loss, current = loss.item(), batch * len(X)
       print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-  
+    # train loss
+    writer.add_scalar("Loss/train", loss, start)
+    writer.add_scalar("Acc/train", predicted.eq(y).sum().item() / y.size(0), global_step=start)
+    start += 1
+
   accuracy = 100. * correct / total
   avg_loss = avg_loss / len(dataloader)
   print('train acc %.5f' % accuracy)
   print('train avg_loss %.5f' % avg_loss)
   print('train batches: ', len(dataloader))
-  
+
   et = time.time()
   return et - st, avg_loss, accuracy
 
@@ -238,7 +249,7 @@ def test(dataloader, model, loss_fn):
 
 
 if __name__ == '__main__':
-  
+
   args = parser.parse_args()
   # reproducibility
   # download training data from open datasets.
@@ -264,7 +275,7 @@ if __name__ == '__main__':
       download=True,
       transform=ToTensor(),
     )
-    
+
     # Download test data from open datasets.
     test_data = datasets.FashionMNIST(
       root="data",
@@ -272,16 +283,16 @@ if __name__ == '__main__':
       download=True,
       transform=ToTensor(),
     )
-  
+
   training_data.data = training_data.data[:args.data_size]
   training_data.targets = training_data.targets[:args.data_size]
-  
+
   betas = (0.96, 0.99) if args.bool_decay else (0, 0)
-  
+
   # get cpu or gpu device for training.
   device = "cuda" if torch.cuda.is_available() else "cpu"
   print(f"Using {device} device")
-  
+
   loss_fn = F.cross_entropy
   methods = {
     'adam': torch.optim.Adam,
@@ -310,9 +321,9 @@ if __name__ == '__main__':
       ),
     'drsom': render_args(args)
   }
-  
+
   pprint(method_kwargs)
-  
+
   results = {}
   name = args.optim
   # model
@@ -323,7 +334,7 @@ if __name__ == '__main__':
     model = VanillaNetwork().to(device)
   else:
     raise ValueError(f"unknown model {args.model}")
-  
+
   if args.resume:
     ckpt = load_checkpoint(args.ckpt_name)
     start_epoch = ckpt['epoch'] + 1
@@ -344,27 +355,32 @@ if __name__ == '__main__':
   st = time.time()
   func = methods[name]
   func_kwargs = method_kwargs.get(name, {})
-  
+
   optimizer = func(model.parameters(), **func_kwargs)
-  
+
   # log name
   log_name = query_name(optimizer, name, args, ckpt)
   writer = SummaryWriter(log_dir=os.path.join(f"{args.tflogger}-{args.seed}", log_name))
   start_time = time.time()
   print(f"Using optimizer:\n {log_name}")
+  start = 0
   for t in range(start_epoch, start_epoch + args.epoch):
     try:
       print(f"epoch {t}")
-      _, avg_loss, acc = train(train_dataloader, name, model, loss_fn,
-                               optimizer, args.interval)
-      
+      _, avg_loss, acc = train(
+        train_dataloader, name, model, loss_fn,
+        optimizer, args.interval,
+        writer, t
+      )
+
       # train loss
-      writer.add_scalar("Loss/train", avg_loss, t)
-      writer.add_scalar("Acc/train", acc, t)
+      writer.add_scalar("Loss/train/epoch", avg_loss, t)
+      writer.add_scalar("Acc/train/epoch", acc, t)
       # test loss
       rt = test(test_dataloader, model, loss_fn)
       writer.add_scalar("Loss/test", rt['avg_loss'], t)
       writer.add_scalar("Acc/test", rt['acc'], t)
+
     except KeyboardInterrupt as e:
       print(f"Exiting at {t}")
       break
@@ -386,11 +402,11 @@ if __name__ == '__main__':
       stats['avg'] = stats['total'] / stats['count']
       stats = stats.sort_values(by='total', ascending=False)
       print(stats.to_markdown())
-  
+
   et = time.time()
-  
+
   print("done!")
-  
+
   subresult = {}
   subresult['info_train'] = test(train_dataloader, model, loss_fn)
   subresult['info_test'] = test(test_dataloader, model, loss_fn)
@@ -399,5 +415,5 @@ if __name__ == '__main__':
   print(subresult)
   del model
   torch.cuda.empty_cache()
-  
+
   print(json.dumps(results, indent=2))
