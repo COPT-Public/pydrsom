@@ -7,7 +7,7 @@ the original dimension-reduced second-order method (DRSOM) in radius free mode
   - we treat the parameters as a set of tensors (no flatten() anymore)
 """
 from pprint import pprint
-from typing import Optional, List
+from typing import Optional
 
 import pandas as pd
 
@@ -15,17 +15,13 @@ from .drsom_utils import *
 from .drsom_utils import DRSOMDecayRules
 
 
-class DRSOMB(torch.optim.Optimizer):
+class HSODM(torch.optim.Optimizer):
   def __init__(
       self,
       params,
       max_iter=15,
       adjrules: Optional[DRSOMAdjustRules] = DRSOMAdjustRules(),
       decayrules: Optional[DRSOMDecayRules] = DRSOMDecayRules(),
-      qpmode: Optional[DRSOMModeQP] = DRSOMModeQP(0),
-      qpsolver: Optional[DRSOMQPSolver] = DRSOMQPSolver(0),
-      normalize=0,
-      mode: Optional[DRSOMMode] = DRSOMMode(0),
       thetas=(0.99, 0.999),
       eps=1e-8,
       **kwargs,
@@ -49,12 +45,7 @@ class DRSOMB(torch.optim.Optimizer):
     __unused = kwargs
     defaults = dict(betas=thetas, eps=eps)
     # params = model.parameters()
-    super(DRSOMB, self).__init__(params, defaults)
-    self.mode = mode
-    self.qpsolver = qpsolver
-    self.qpmode = qpmode
-    self.directions = mode.get_directions()
-    self.bool_normalize = normalize
+    super(HSODM, self).__init__(params, defaults)
     ##########################
     # AD hvps
     ##########################
@@ -62,7 +53,7 @@ class DRSOMB(torch.optim.Optimizer):
     self._params = self.get_params()
     for p in self._params:
       # keep momentum
-      for k in self.directions:
+      for k in DRSOM_DIRECTIONS:
         self.state[p][k] = torch.zeros_like(p.data, requires_grad=True)
     
     #
@@ -117,7 +108,7 @@ class DRSOMB(torch.optim.Optimizer):
     #########################
   
   def get_name(self):
-    return f"drsom-b@{self.qpsolver.name}@{self.qpmode.name}d@{self.mode.name}:{self.decayrule.__str__()}-{self.adjrule.__str__()}"
+    return f"drsom-b:qp@{DRSOM_MODE_QP}d@{DRSOM_MODE}.{self.option_tr}:ad@{DRSOM_MODE_HVP}:{self.decayrule.__str__()}-{self.adjrule.__str__()}"
   
   def get_params(self):
     """
@@ -147,7 +138,7 @@ class DRSOMB(torch.optim.Optimizer):
   def _clear_momentum(self):
     # only has globally state
     for p in self._params:
-      for k in self.directions:
+      for k in DRSOM_DIRECTIONS:
         if k in self.state[p]:
           self.state[p][k].zero_()
   
@@ -211,10 +202,10 @@ class DRSOMB(torch.optim.Optimizer):
         self.Hv[i] = self.hv(directions[i])
       elif style == 1:
         raise ValueError(
-          "the finite diff option is unused,"
+          "the finite diff option is unused," " try DRSOM_MODE_HVP=0"
         )
       else:
-        raise ValueError("not implemented,")
+        raise ValueError("not implemented," " try DRSOM_MODE_HVP=0")
     for i in range(dim):
       for j in range(i, dim):
         for idx, p in enumerate(self._params):
@@ -289,6 +280,7 @@ class DRSOMB(torch.optim.Optimizer):
       a = [*a2, *a]
       return a
     
+    
     ###########################################################
     # we compute k > dim*(dim+1)/2 directions so that
     #   Q can be determined by solving a linear system;
@@ -346,7 +338,7 @@ class DRSOMB(torch.optim.Optimizer):
   
   @drsom_timer
   def update_trust_region(
-      self, p_copy, directions, fx=0.0, closure=None
+      self, p_copy, directions, fx=0.0, closure=None, style=DRSOM_MODE_HVP
   ):
     
     __unused = p_copy
@@ -354,7 +346,7 @@ class DRSOMB(torch.optim.Optimizer):
     dim = len(directions)
     # construct G (the inner products)
     G = torch.zeros((dim, dim), requires_grad=False, device="cpu")
-    if self.qpsolver in {DRSOMQPSolver.QRegP, DRSOMQPSolver.TRSP}:
+    if self.option_tr == 'p':
       for i in range(dim):
         for j in range(i, dim):
           for p in self._params:
@@ -366,7 +358,7 @@ class DRSOMB(torch.optim.Optimizer):
       for i in range(dim):
         for j in range(i):
           G[i, j] = G[j, i]
-    
+          
     else:
       # simply use the eye matrix
       for i in range(dim):
@@ -384,15 +376,11 @@ class DRSOMB(torch.optim.Optimizer):
       #   this never happens
       pass
     else:
-      if self.qpmode == DRSOMModeQP.FiniteDiff:
+      if DRSOM_MODE_QP == 0:
         with torch.enable_grad():
-          Q = self.compute_Q_via_hvp(directions, 1)
+          Q = self.compute_Q_via_hvp(directions, style)
           self.zero_grad()
-      elif self.qpmode == DRSOMModeQP.AutomaticDiff:
-        with torch.enable_grad():
-          Q = self.compute_Q_via_hvp(directions, 0)
-          self.zero_grad()
-      elif self.qpmode == DRSOMModeQP.Interpolation:
+      elif DRSOM_MODE_QP == 1:
         Q = self.compute_Q_via_interpolation(
           directions,
           p_copy=p_copy,
@@ -444,7 +432,7 @@ class DRSOMB(torch.optim.Optimizer):
       torch.autograd.set_detect_anomaly(True)
     
     #
-    self.decayrule.adjust_gamma_and_radius(self)
+    self.adjust_gamma_and_radius()
     
     loss = closure()
     
@@ -453,16 +441,17 @@ class DRSOMB(torch.optim.Optimizer):
     
     # @note
     # no need to scale (even for gradient) since it is a new tensor.
-    g_old = self.gather_normalized_grad(alpha=-1, bool_normalized=self.bool_normalize)
+    g_old = self.gather_normalized_grad(alpha=-1, bool_normalized=DRSOM_NORMALIZE)
     directions = [
       g_old,  # make sure -g is the first direction
-      *(self.gather_normalize(k, bool_normalized=self.bool_normalize) for k in self.directions),
+      *(self.gather_normalize(k, bool_normalized=DRSOM_NORMALIZE) for k in DRSOM_DIRECTIONS),
     ]
     self.update_trust_region(
       p_copy,
       directions,
       fx=loss.cpu().detach(),
       closure=closure,
+      style=DRSOM_MODE_HVP,
     )
     # accept or not?
     acc_step = False
@@ -550,11 +539,11 @@ class DRSOMB(torch.optim.Optimizer):
           self._set_param(p_copy)
         
         else:
-          if "momentum_g" in self.directions:
+          if "momentum_g" in DRSOM_DIRECTIONS:
             # compute momentum_g
             _loss = closure()
             raise ValueError("not implemented")
-          elif "momentum" in self.directions:
+          elif "momentum" in DRSOM_DIRECTIONS:
             self._save_momentum(d_new, "momentum")
           else:
             # no momentum has to be kept
@@ -573,3 +562,82 @@ class DRSOMB(torch.optim.Optimizer):
         self.gamma = self.gammalb
     
     return loss
+  
+  def adjust_gamma_and_radius(self):
+    if DRSOM_MODE_DECAY == 0:
+      if ((self.iter + 1) % self.decayrule.decay_window) == 0:
+        # using the following formulae
+        # gamma = gamma_0 * gamma_max *
+        #   sin[pi/2/M * max(k - m, 0)]
+        # - k iteration #
+        # - M total iterations
+        # - gamma_0, gamma_max, initial and target
+        scale = (
+            max(0, self.iter + 1 - self.decayrule.decay_sin_min_scope)
+            / self.decayrule.decay_sin_max_scope
+        )
+        self.gammalb = max(
+          self.gammalb0,
+          self.gammalb0
+          * self.decayrule.decay_sin_rel_max
+          * np.sin(0.5 * np.pi * scale ** 1.5),
+        )
+    
+    
+    elif DRSOM_MODE_DECAY == 1:
+      # using the following formulae
+      # gamma = gamma_0 * gamma_max *
+      #   sin[pi/2/M * max(k - m, 0)]
+      # - k iteration #
+      # - M total iterations
+      # - gamma_0, gamma_max, initial and target
+      scale = (
+          max(0, self.iter + 1 - self.decayrule.decay_sin_min_scope)
+          / self.decayrule.decay_sin_max_scope
+      )
+      self.gammalb = max(
+        self.gammalb0,
+        self.gammalb0
+        * self.decayrule.decay_sin_rel_max
+        * np.sin(0.5 * np.pi * scale ** 1.5),
+      )
+    
+    elif DRSOM_MODE_DECAY == 2:
+      # using the following formulae
+      # gamma = gamma_0 * gamma_max *
+      #   1/{1 + exp[-10 + 20/M*(x)]}
+      # - k iteration #
+      # - M total iterations
+      # - gamma_0, gamma_max, initial and target
+      self.gammalb = (
+          self.gammalb0
+          * self.decayrule.decay_sin_rel_max
+          / (
+              1
+              + np.exp(
+            10 - 20 * (self.iter + 1) / self.decayrule.decay_sin_max_scope
+          )
+          )
+      )
+    
+    # elif DRSOM_MODE_DECAY == 3:
+    #   # using the following formulae
+    #   # a linear function
+    #   # - k iteration #
+    #   # - M total iterations
+    #   # - gamma_0, gamma_max, initial and target
+    #   self.gammalb = self.gammalb0 * (
+    #         1 + self.decayrule.decay_sin_rel_max *
+    #         (self.iter + 1) / self.decayrule.decay_sin_max_scope)
+    
+    if ((self.iter + 1) % 1000) == 0:
+      print(
+        f"current regularization terms: {self.gammalb} and {self.radiusub}\n"
+        f"using rule {DRSOM_MODE_DECAY}"
+      )
+    
+    # adjust delta
+    if DRSOM_MODE_DELTA == 0:
+      self.delta = max(1e-3, min(self.alpha_norm, 1e1))
+    elif DRSOM_MODE_DELTA == 1:
+      self.delta = max(1e-3, min(self.alpha_norm, 1e-2))
