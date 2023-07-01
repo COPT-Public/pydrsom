@@ -8,31 +8,10 @@ from argparse import ArgumentParser
 import scipy.linalg
 import torch
 import numpy as np
+from enum import IntEnum
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 DRSOM_VERBOSE = int(os.environ.get('DRSOM_VERBOSE', 0))
-DRSOM_NORMALIZE = int(os.environ.get('DRSOM_NORMALIZE', 0))
-# QP construction (0-hvp, 1-interpolation)
-DRSOM_MODE_QP = int(os.environ.get('DRSOM_MODE_QP', 1))
-# hvp or interpolation strategy
-DRSOM_MODE_HVP = int(os.environ.get('DRSOM_MODE_HVP', 0))
-DRSOM_MODE_DELTA = int(os.environ.get('DRSOM_MODE_DELTA', 0))
-# subproblem strategy
-DRSOM_MODE_TRS = int(os.environ.get('DRSOM_MODE_TRS', 0))
-# gamma and radius decay
-DRSOM_MODE_DECAY = int(os.environ.get('DRSOM_MODE_DECAY', 1))
-# direction
-DRSOM_MODE = int(os.environ.get('DRSOM_MODE', 0))
-if DRSOM_MODE == 0:
-  DRSOM_DIRECTIONS = ['momentum']
-elif DRSOM_MODE == 1:
-  DRSOM_DIRECTIONS = ['momentum_g']
-elif DRSOM_MODE == 2:
-  DRSOM_DIRECTIONS = ['momentum_g', 'momentum']
-elif DRSOM_MODE == 3:
-  DRSOM_DIRECTIONS = []
-else:
-  raise ValueError("invalid selection of mode")
 
 DRSOM_GLOBAL_PROFILE = {
   'count': collections.defaultdict(int),
@@ -79,6 +58,8 @@ def drsom_timer(func):
 ##########################################
 class TRS:
   eigvalsh = scipy.linalg.eigvalsh
+  # lsolve = torch.linalg.solve
+  # lsolve = torch.solve
   lsolve = torch.linalg.solve
   
   @staticmethod
@@ -155,7 +136,7 @@ class TRS:
         alpha = alpha / alpha.norm() * optimizer.radius
     else:
       # apply root-finding
-      if DRSOM_MODE_TRS:
+      if optimizer.qpsolver in {DRSOMQPSolver.TRSP, DRSOMQPSolver.TRSA}:
         it, lmd, alpha, norm, active = TRS._compute_root_tr(Q, c, optimizer.radius, G)
       else:
         it, lmd, alpha, norm, active = TRS._compute_root(Q, c, optimizer.gamma, G)
@@ -178,7 +159,14 @@ def add_parser_options(parser: ArgumentParser):
   ##############
   parser.add_argument("--itermax", required=False, type=int, default=15)
   parser.add_argument(
-    "--option_tr", required=False, type=str, default="p", choices=["a", "p"]
+    "--mode", required=False, type=int, default=0)
+  parser.add_argument(
+    "--drsom_construct_qp", required=False, type=int, default=0)
+  parser.add_argument(
+    "--drsom_solve_qp", required=False, type=int, default=0
+  )
+  parser.add_argument(
+    "--drsom_normalize", required=False, type=int, default=0
   )
   ##############
   # "learning rate scheduler and hyperparames" for DRSOM
@@ -188,7 +176,12 @@ def add_parser_options(parser: ArgumentParser):
     type=int,
     help="the frequency of updating QP model",
   )
-  
+  ##################
+  # decay rules
+  parser.add_argument(
+    "--drsom_decay_mode", default=0, type=float, help=
+    """see drsom_decay_window"""
+  )
   parser.add_argument(
     "--drsom_decay_window",
     default=8000,
@@ -237,6 +230,7 @@ def add_parser_options(parser: ArgumentParser):
     help="see drsom_decay_sin_rel_max",
   )
   ##################
+  # adjust trs rules (acceptance)
   parser.add_argument(
     "--drsom_adjust_eta",
     default=0.08,
@@ -245,7 +239,7 @@ def add_parser_options(parser: ArgumentParser):
   )
   parser.add_argument(
     "--drsom_adjust_beta1",
-    default=50,
+    default=20,
     type=float,
     help="see drsom_decay_sin_rel_max",
   )
@@ -271,6 +265,7 @@ def add_parser_options(parser: ArgumentParser):
 
 def render_args(args):
   drsom_decay_rules = DRSOMDecayRules(
+    decay_mode=args.drsom_decay_mode,
     decay_qp_freq=args.drsom_qp_freq,
     decay_window=args.drsom_decay_window,
     decay_step=args.drsom_decay_step,
@@ -286,12 +281,67 @@ def render_args(args):
     adjust_zeta1=args.drsom_adjust_zeta1,
     adjust_zeta2=args.drsom_adjust_zeta2,
   )
+  
   return dict(
-    option_tr=args.option_tr,
     max_iter=args.itermax,
     decayrules=drsom_decay_rules,
     adjrules=drsom_adjust_rules,
+    mode=DRSOMMode(args.mode),
+    qpmode=DRSOMModeQP(args.drsom_construct_qp),
+    qpsolver=DRSOMQPSolver(args.drsom_solve_qp),
+    normalize=args.drsom_normalize,
   )
+
+
+class DRSOMMode(IntEnum):
+  """
+  Direction used in DRSOM
+  """
+  Momentum = 0  # momentum
+  MomentumG = 1  # momentum_g
+  MomGandMom = 2  # 'momentum_g', 'momentum'
+  GradientOnly = 3
+  
+  def get_directions(self):
+    if self == 0:
+      directions = ['momentum']
+    elif self == 1:
+      directions = ['momentum_g']
+    elif self == 2:
+      directions = ['momentum_g', 'momentum']
+    elif self == 3:
+      directions = []
+    else:
+      raise ValueError("invalid selection of mode")
+    return directions
+
+
+class DRSOMModeDecay(IntEnum):
+  """
+  rules to decay gamma and radius
+  """
+  Con = -1
+  Sin = 0
+  Exp = 1
+
+
+class DRSOMQPSolver(IntEnum):
+  """
+  rules to solve QP
+  """
+  QRegP = 0 # Regularization "radius free"
+  QRegA = 1 # Regularization "radius free"
+  TRSP = 2 # TRS 'a' mode
+  TRSA = 3 # TRS 'p' mode
+
+
+class DRSOMModeQP(IntEnum):
+  """
+  rules to construct QP
+  """
+  Interpolation = 0
+  AutomaticDiff = 1
+  FiniteDiff = 2
 
 
 class DRSOMDecayRules(object):
@@ -301,7 +351,7 @@ class DRSOMDecayRules(object):
     self.qp_freq = kwargs.get("decay_qp_freq", 1)
     
     # linear rule
-    self.decay_mode = DRSOM_MODE_DECAY
+    self.decay_mode = DRSOMModeDecay(kwargs.get("decay_mode", 0))
     self.decay_window = kwargs.get("decay_window", 8000)
     self.decay_step = kwargs.get("decay_step", 5e2)
     self.decay_radius_step = kwargs.get("decay_radius_step", 2e-1)
@@ -317,7 +367,53 @@ class DRSOMDecayRules(object):
     return json.dumps(self.__dict__, indent=2)
   
   def __str__(self):
-    return f"[{DRSOM_MODE_DECAY}w@{self.decay_sin_rel_max:.2e}:{self.decay_sin_min_scope:.2e}-{self.decay_sin_max_scope:.2e}]"
+    return f"[{self.decay_mode}w@{self.decay_sin_rel_max:.2e}:{self.decay_sin_min_scope:.2e}-{self.decay_sin_max_scope:.2e}]"
+  
+  def adjust_gamma_and_radius(self, opt):
+    if self.decay_mode == DRSOMModeDecay.Sin:
+      if ((opt.iter + 1) % self.decay_window) == 0:
+        # using the following formulae
+        # gamma = gamma_0 * gamma_max *
+        #   sin[pi/2/M * max(k - m, 0)]
+        # - k iteration #
+        # - M total iterations
+        # - gamma_0, gamma_max, initial and target
+        scale = (
+            max(0, opt.iter + 1 - self.decay_sin_min_scope)
+            / self.decay_sin_max_scope
+        )
+        opt.gammalb = max(
+          opt.gammalb0,
+          opt.gammalb0
+          * self.decay_sin_rel_max
+          * np.sin(0.5 * np.pi * scale ** 1.5),
+        )
+    
+    elif self.decay_mode == DRSOMModeDecay.Exp:
+      # using the following formulae
+      # gamma = gamma_0 * gamma_max *
+      #   1/{1 + exp[-10 + 20/M*(x)]}
+      # - k iteration #
+      # - M total iterations
+      # - gamma_0, gamma_max, initial and target
+      opt.gammalb = (
+          opt.gammalb0
+          * self.decay_sin_rel_max
+          / (
+              1
+              + np.exp(
+            10 - 20 * (opt.iter + 1) / self.decay_sin_max_scope
+          )
+          )
+      )
+    elif self.decay_mode == DRSOMModeDecay.Con:
+      pass
+    
+    if ((opt.iter + 1) % 1000) == 0:
+      print(
+        f"current regularization terms: {opt.gammalb} and {opt.radiusub}\n"
+        f"using rule {self.decay_mode}"
+      )
 
 
 class DRSOMAdjustRules(object):

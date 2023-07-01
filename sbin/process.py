@@ -17,55 +17,45 @@ import sys
 
 import plotly.graph_objects as go
 import pandas as pd
+from tsmoothie.smoother import *
 
 NAME = {
   'adam': 'Adam',
-  'rsomf': 'DRSOM',
-  'sgd1': 'SGD-0.95',
-  'sgd2': 'SGD-0.90',
-  'sgd3': 'SGD-0.85',
-  'sgd4': 'SGD-0.99',
-  'rsomf-100': 'DRSOM-1e2',
-  'rsomf-500': 'DRSOM-5e2',
-  'rsomf-200': 'DRSOM-1e3',
-  'adam-30': 'Adam-30',
-  'adam-40': 'Adam-40',
-  'drsom-mode:0-p': "DRSOM-2D",
-  'drsom-mode:1-p': "DRSOM-2D-dg",
-  'drsom-mode:2-p': "DRSOM-3D-dg",
-  'drsom-mode:3-p': "DRSOM-2D-g-alone",
-  'drsom-mode:3-p-r-20': "DRSOM-2D-g-alone-resume"
+  'sgd1': 'SGDm-0.90',
+  'sgd2': 'SGDm-0.95',
+  'sgd3': 'SGDm-0.99',
+  'drsom-g': 'DRSOM-g',
+  'drsom-gd': 'DRSOM-g+d',
 }
 dfs = {}
 dirin = sys.argv[1]
 dirout = sys.argv[2]
 for f in os.listdir(dirin):
-  if not f.endswith('csv'):
-    continue
-  metric, cat, method = f.split('.')[-2].split("_")[0:3]
-  metric = metric.lower()
-  cat = cat.lower()
-  method = method.lower()
-  df = pd.read_csv(f"{sys.argv[1]}/{f}")
-  df = df.rename(columns={k: k.lower() for k in df.columns})
-  if df.shape[0] == 0:
-    print(f'no data for {f}')
-    continue
-  # df['Wall time'] = pd.to_datetime(df['Wall time'])
-  df['method'] = method
-  df['subset'] = cat
-  df[metric] = df['value']
-  df = df.set_index(['subset', 'method', 'step']).drop(columns=['value'])
-  if (cat, method) in dfs:
-    dfs[cat, method][metric] = df[metric]
-  else:
-    dfs[cat, method] = df
+  if f.endswith('csv'):
+    metric, cat, method = f.split('.')[-2].split("_")[0:3]
+    metric = metric.lower()
+    cat = cat.lower()
+    method = method.lower()
+    df = pd.read_csv(f"{sys.argv[1]}/{f}")
+    df = df.rename(columns={k: k.lower() for k in df.columns})
+    if df.shape[0] == 0:
+      print(f'no data for {f}')
+      continue
+    # df['Wall time'] = pd.to_datetime(df['Wall time'])
+    df['method'] = method
+    df['subset'] = cat
+    df[metric] = df['value']
+    df = df.set_index(['subset', 'method', 'step']).drop(columns=['value'])
+    if (cat, method) in dfs:
+      dfs[cat, method][metric] = df[metric]
+    else:
+      dfs[cat, method] = df
 
 
 def choose_color(m):
-  if m == 'rsomf':
+  if m == 'drsom-g':
     return 'black'
-  if m == 'rsomf-100':
+  if m == 'drsom-gd':
     return 'rgb(128,128,128)'
   return 'rgb(60,60,60)'
 
@@ -74,25 +64,41 @@ def choose_color(m):
 # plot train
 ranges = {
   'accuracy': [75, 102],
-  'acc': [75, 102],
+  'acc': [0.7, 1.02],
   'loss': [0, 1]
 }
-x_range = [0, 30]
-# methods = ['adam', 'rsomf', 'sgd']
+# x_range = [0, 81]
+x_range = [0, 30000]
 methods = NAME.keys()
 for cat in ['train', 'test']:
+  # for metric in ['loss', 'acc']:
   for metric in ['loss', 'acc']:
-    data = [
-      go.Line(x=dfs[cat, m].index.get_level_values(2),
-              y=dfs[cat, m][metric],
-              name=NAME.get(m, m),
-              line=dict(width=2, color=choose_color(m)) if m in {'rsomf', 'rsomf-100', 'rsomf-200'} else dict(width=2)
-              )
-      for m in methods
-      if (cat, m) in dfs
-    ]
+    # for metric in ['acc']:
+    data = []
+    for m in methods:
+      if (cat, m) not in dfs:
+        continue
+      ax = dfs[cat, m].index.get_level_values(2).to_list()
+      if metric == 'loss':
+        smoother = ExponentialSmoother(window_len=20, alpha=0.05)
+      else:
+        smoother = ExponentialSmoother(window_len=10, alpha=0.05)
+
+      smoother.smooth(dfs[cat, m][metric])
+      # low, up = smoother.get_intervals('prediction_interval', confidence=0.01)
+      line = go.Line(
+        x=ax,
+        y=smoother.smooth_data[0],
+        name=NAME.get(m, m),
+        line=dict(width=1.5, color=choose_color(m))
+        if m.startswith("drsom")
+        else dict(width=1.5)
+      )
+      print(cat, metric, m, f"{smoother.smooth_data[0][-1]: .2f}")
+      data.append(line)
+
     opt_yaxis = dict(
-      title=f"{metric}",
+      title=f"{cat}-{metric}",
       color='black',
       range=ranges[metric]
     )
@@ -102,11 +108,18 @@ for cat in ['train', 'test']:
         opt_yaxis['range'] = [-5, 1]
       else:
         opt_yaxis['range'] = [-1, 0]
-    
+    else:
+      if cat == 'train':
+        # opt_yaxis['range'] = [80, 102]
+        opt_yaxis['range'] = [0.8, 1.02]
+      else:
+        # opt_yaxis['range'] = [80, 96]
+        opt_yaxis['range'] = [0.80, 0.96]
+
     layout = go.Layout(
       plot_bgcolor='rgba(255, 255, 255, 1)',
       xaxis=dict(
-        title=f"epoch",
+        title=f"steps",
         color='black',
         range=x_range
       ),
@@ -135,5 +148,6 @@ for cat in ['train', 'test']:
     )
     fig.update_xaxes(style_grid)
     fig.update_yaxes(style_grid)
-    fig.write_image(f"{dirout}/{cat}-{metric}.png", scale=10)
+    fig.write_image(f"{dirout}/{cat}-{metric}.png", scale=3)
     fig.write_html(f"{dirout}/{cat}-{metric}.html")
+    # break
