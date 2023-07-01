@@ -98,7 +98,7 @@ class DRSOMB(torch.optim.Optimizer):
     ##########################
     # gamma & lower bound on gamma
     self.gamma = 1e-6
-    self.gammalb = self.gammalb0 = 1e-12
+    self.gammalb = self.gammalb0 = float(os.environ.get("lb", 1e-8))
     # maximum step size
     self.radius = 1e1
     self.radiusub = 1e1

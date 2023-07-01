@@ -58,6 +58,8 @@ def drsom_timer(func):
 ##########################################
 class TRS:
   eigvalsh = scipy.linalg.eigvalsh
+  # lsolve = torch.linalg.solve
+  # lsolve = torch.solve
   lsolve = torch.linalg.solve
   
   @staticmethod
@@ -177,7 +179,7 @@ def add_parser_options(parser: ArgumentParser):
   ##################
   # decay rules
   parser.add_argument(
-    "--drsom_decay_mode", default=1, type=float, help=
+    "--drsom_decay_mode", default=0, type=float, help=
     """see drsom_decay_window"""
   )
   parser.add_argument(
@@ -318,6 +320,7 @@ class DRSOMModeDecay(IntEnum):
   """
   rules to decay gamma and radius
   """
+  Con = -1
   Sin = 0
   Exp = 1
 
@@ -403,6 +406,8 @@ class DRSOMDecayRules(object):
           )
           )
       )
+    elif self.decay_mode == DRSOMModeDecay.Con:
+      pass
     
     if ((opt.iter + 1) % 1000) == 0:
       print(
